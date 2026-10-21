@@ -8,21 +8,22 @@ Each record states:
 - **Decision** — what we chose
 - **Consequences** — what it costs, and what it forecloses
 
-ADRs are written as the corresponding code lands, not in advance. A record whose decision is
-still unimplemented is marked **planned** and gets its content when the code arrives.
+These record the decisions taken before the code was written, from the design discussion kept under
+`docs/discussion/`. They describe intent, so where an ADR and the code disagree, one of them is
+wrong — fix whichever it is in the same change.
 
 ## Index
 
-| ADR  | Decision                                                              | Status  |
-| ---- | --------------------------------------------------------------------- | ------- |
-| 0001 | The daemon owns the mIRC socket; agent connections are ephemeral       | planned |
-| 0002 | NDJSON wire protocol ("MBP") and the mSL constraints that shape it     | planned |
-| 0003 | MCP is the only agent surface — no REST door                          | planned |
-| 0004 | Target MCP revision `2025-11-25`, structure for `2026-07-28`           | planned |
-| 0005 | State-aware, idempotent compound commands                             | planned |
-| 0006 | Shared bearer token, and default-deny gating for `raw`                 | planned |
-| 0007 | Structured JSONL logging with mandatory redaction                     | planned |
-| 0008 | `selfnick` is first-class state, not an edge case                     | planned |
-| 0009 | Failure taxonomy and pre-flight checks                                | planned |
-| 0010 | Relay DCC outcomes only; do not report progress                       | planned |
-| 0011 | Topology and the filesystem boundary                                  | planned |
+| ADR  | Decision                                                         | Status   |
+| ---- | ---------------------------------------------------------------- | -------- |
+| 0001 | The daemon owns the mIRC socket; agent connections are ephemeral | accepted |
+| 0002 | NDJSON wire protocol, shaped by mSL                              | accepted |
+| 0003 | MCP is the only agent surface                                    | accepted |
+| 0004 | Target MCP revision `2025-11-25`                                 | accepted |
+| 0005 | State-aware, idempotent compound commands                        | accepted |
+| 0006 | One shared bearer token, and default-deny gating                 | accepted |
+| 0007 | Structured JSONL logging, with mandatory redaction               | accepted |
+| 0008 | Our own nick changes are first-class state                       | accepted |
+| 0009 | Failure taxonomy and pre-flight checks                           | accepted |
+| 0010 | Relay DCC outcomes, not progress                                 | accepted |
+| 0011 | Topology and the filesystem boundary                             | accepted |

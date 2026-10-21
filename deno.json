@@ -19,5 +19,5 @@
   "compilerOptions": {
     "strict": true
   },
-  "exclude": ["logs/", "docs/", ".commandcode/"]
+  "exclude": ["logs/", ".commandcode/"]
 }
