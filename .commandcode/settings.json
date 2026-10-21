@@ -9,7 +9,13 @@
       "Shell(deno fmt)",
       "Shell(deno lint)",
       "Shell(git:*)",
-      "Shell(more:*)"
+      "Shell(more:*)",
+      "Shell(dir:*)",
+      "Shell(deno check src/core/types.ts src/core/wire.ts src/core/log.ts src/core/bus.ts src/core/buffers.ts src/core/state.ts src/core/waits.ts src/core/dcc.ts src/core/outcomes.ts src/core/commands.ts src/core/sessions.ts src/mirc/connection.ts src/mirc/listener.ts)",
+      "Shell(deno check src/core/*.ts src/mirc/*.ts)",
+      "Shell(deno test -A tests/ 2 >& 1)",
+      "Shell(findstr:*)",
+      "Shell(deno test -A tests/mirc_bridge_test.ts)"
     ],
     "deny": [],
     "defaultMode": "default"
