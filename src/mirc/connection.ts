@@ -47,6 +47,9 @@ class SocketWriter {
   write(frame: unknown): void {
     if (this.#closed) throw new Error("socket closed");
     const bytes = encodeFrame(frame);
+    // Log the decoded frame rather than the bytes: the file sink is the wire
+    // trace, and redaction works on fields, not on raw buffers.
+    this.#log.debug("mbp.out", { frame });
     this.#queue = this.#queue
       .then(async () => {
         await this.#conn.write(bytes);

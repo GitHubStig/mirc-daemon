@@ -3,9 +3,9 @@
     "dev": "deno run --watch --allow-net --allow-env --allow-read --allow-write=logs src/main.ts",
     "start": "deno run --allow-net --allow-env --allow-read --allow-write=logs src/main.ts",
     "test": "deno test -A tests/",
-    "check": "deno check src/main.ts tests/",
+    "check": "deno check src/main.ts scripts/ tests/",
     "token": "deno run --allow-read --allow-write=mirc scripts/token.ts",
-    "log:tail": "deno eval \"const d='logs';const f=[...Deno.readDirSync(d)].filter(x=>x.name.endsWith('.jsonl')).sort((a,b)=>a.name<b.name?-1:1).pop();if(!f)throw new Error('no log files');for await (const line of (await Deno.open(d+'/'+f.name)).readable.pipeThrough(new TextDecoderStream()).pipeThrough(new TextLineStream())) console.log(line)\"",
+    "log:tail": "deno run --allow-read=logs scripts/log_tail.ts",
     "fmt": "deno fmt",
     "lint": "deno lint"
   },
