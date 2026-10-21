@@ -15,9 +15,12 @@ There is **no LLM or provider code in this repo.** The daemon is a control surfa
 
 - **Stop at each major phase and wait for review before committing.** Do not commit without an
   explicit go-ahead.
-- **Commits use Conventional Commits**, with a paragraph-length body summarising what was done and
-  why.
+- **Commits use Conventional Commits**, with a paragraph-length body summarising what was done
+  and why.
 - **Never add a `Co-authored-by` trailer** or any co-author line to a commit message.
+- **Never pass a secret on the command line.** The permission collector records approved commands
+  verbatim into `.commandcode/settings.json`, so a token in an argument gets written to a file.
+  Secrets belong in gitignored files (`mirc/bridge.ini`, `.env`) or in the environment.
 
 ## Non-negotiable design constraints
 

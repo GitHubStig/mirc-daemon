@@ -1,3 +1,9 @@
 logs/
 mirc/bridge.ini
 .env
+
+# Machine-collected, not authored: the permission collector appends every
+# approved command verbatim, so this file accumulates literal command lines and
+# whatever arguments they carried. Not a shareable convention.
+.commandcode/settings.json
+.commandcode/settings.local.json
