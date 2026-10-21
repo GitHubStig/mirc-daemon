@@ -2,7 +2,7 @@
 
 ## What this is
 
-`mirc-agent` is a Deno/TypeScript daemon that bridges a running **mIRC** client and AI coding
+`mirc-daemon` is a Deno/TypeScript daemon that bridges a running **mIRC** client and AI coding
 agents. mIRC owns the IRC connection; agents drive mIRC through the daemon.
 
 There is **no LLM or provider code in this repo.** The daemon is a control surface and an event bus
