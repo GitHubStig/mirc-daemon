@@ -21,11 +21,14 @@ export type ErrorCode =
   | "join_failed"
   | "join_timeout"
   | "not_on_channel"
+  | "unknown_network"
+  | "ambiguous_network"
   | "nick_not_found"
   | "bot_not_in_channel"
   | "bot_no_response"
   | "bot_refused"
   | "dcc_failed"
+  | "server_error"
   | "timeout"
   | "guard_denied"
   | "weak_match";
@@ -46,6 +49,16 @@ export function bridgeError(
   extra: { numeric?: number; detail?: string } = {},
 ): BridgeError {
   return { code, hint, ...extra };
+}
+
+/** An Error carrying a BridgeError, for throwing inside the core. */
+export class BridgeFailure extends Error {
+  readonly error: BridgeError;
+  constructor(error: BridgeError) {
+    super(error.hint);
+    this.name = "BridgeFailure";
+    this.error = error;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -89,8 +102,12 @@ export interface ResFrame {
   hint?: string;
 }
 
-export interface StateFrame {
-  t: "state";
+/**
+ * Shape of `res.data` for the `state` action: what mIRC reports about itself.
+ * Carried inside the normal command reply rather than as a bespoke frame, so the
+ * dispatcher has exactly one reply mechanism and one correlation path.
+ */
+export interface StatePayload {
   networks: NetworkState[];
 }
 
@@ -130,7 +147,7 @@ export interface EventFrame {
   extra?: Record<string, unknown>;
 }
 
-export type InboundFrame = HelloFrame | ResFrame | StateFrame | PongFrame | EventFrame;
+export type InboundFrame = HelloFrame | ResFrame | PongFrame | EventFrame;
 
 // ---------------------------------------------------------------------------
 // Wire frames: daemon → mIRC
@@ -207,7 +224,8 @@ export type DccState = "in_flight" | "complete" | "failed";
 export interface DccJob {
   id: string;
   net: string;
-  file: string;
+  /** Unknown until mIRC reports the transfer, since there is no pre-transfer hook. */
+  file?: string;
   size?: number;
   state: DccState;
   startedTs: number;
