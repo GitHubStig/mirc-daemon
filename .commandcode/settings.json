@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(git status --short --branch 2>&1; echo \"---\"; git log --oneline -5 2>&1)",
+      "Shell(deno --version)",
+      "Shell(deno eval \"import { assertEquals } from 'jsr:@std/assert@1'; assertEquals(1,1); console.log('jsr ok')\")",
+      "Shell(deno check src/core/types.ts src/core/wire.ts src/core/log.ts tests/wire_test.ts tests/log_test.ts)",
+      "Shell(deno test -A tests/)",
+      "Shell(deno fmt)",
+      "Shell(deno lint)",
+      "Shell(git:*)",
+      "Shell(more:*)"
+    ],
+    "deny": [],
+    "defaultMode": "default"
+  }
+}
