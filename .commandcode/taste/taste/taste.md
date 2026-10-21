@@ -5,4 +5,7 @@
 - Wants work to stop at each major phase/step so they can review the code before anything is committed — review checkpoints over continuous building. Confidence: 0.85
 - Prefers durable project rules to live in a harness-agnostic `AGENTS.md` at the repo root rather than tool-specific config files, so any AI coding agent picks them up. Confidence: 0.7
 - Prefers simple, flat file layouts over nested or self-referential structures. Confidence: 0.55
-- Issues terse one-word commands ("resume", "yes", "done") and expects the agent to pick up from existing context and continue the work directly, without a recap, re-planning, or confirmation prompts. Confidence: 0.65
+- Issues terse one-word commands ("resume", "yes", "done", "commit") and expects the agent to pick up from existing context and continue the work directly, without a recap, re-planning, or confirmation prompts. Confidence: 0.65
+- Security-conscious about secrets: wants tokens/credentials kept out of tracked files and command lines, treats any token that has appeared in logs, shell history or terminal output as compromised and burns it, and wants leaks eliminated by design (e.g. reading the secret from a dedicated config file) rather than cleaned up after the fact. Confidence: 0.6
+- Treats tool/harness-managed directories (e.g. `.commandcode/`) as machine-managed and off-limits to manual agent edits, and prefers the agent ask before touching them. Confidence: 0.6
+- Prefers auto-collected / machine-generated tool files (e.g. the permission collector's `settings.json`) be gitignored wholesale rather than curated and kept tracked, since they are transcripts of a session rather than shareable convention. Confidence: 0.55
