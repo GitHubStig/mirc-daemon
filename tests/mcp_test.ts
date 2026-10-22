@@ -1079,3 +1079,63 @@ Deno.test("xdcc_list: 'XDCC LIST Denied' is bot_refused, not a pack list", async
     await s.stop();
   }
 });
+
+// --- connecting that fails, and TLS ---------------------------------------------
+
+Deno.test("tls: true goes to mIRC as a plain number flag", async () => {
+  const s = await stack();
+  try {
+    growOnConnect(s, 7, "Libera");
+    await s.client.callTool({
+      name: "irc_ensure_connected",
+      arguments: { network: "Libera", server: "irc.libera.chat", tls: true },
+    });
+    const connect = s.fake.received.find((c) => c.action === "connect");
+    assertEquals(connect?.params?.tls, 1);
+    assertEquals(connect?.params?.port, undefined);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("a connect that fails still leaves the agent owning the window it opened", async () => {
+  const s = await stack();
+  try {
+    // As seen live: mIRC opens the window, cannot reach the server, and keeps
+    // retrying. CONNECTFAIL answers the command with mIRC's reason.
+    s.fake.setHandler((cmd, fake) => {
+      if (cmd.action !== "connect") return undefined;
+      fake.setNetworks([
+        network(),
+        network({
+          cid: 50,
+          name: "",
+          server: "irc.dead.example",
+          status: "connecting",
+          channels: [],
+          members: {},
+        }),
+      ]);
+      return { ok: false, numeric: 0, err: "Unable to connect to server (Connection timed out)" };
+    });
+    const result = await s.client.callTool({
+      name: "irc_connect",
+      arguments: { server: "irc.dead.example" },
+    });
+    const text = textOf(result);
+    assertEquals(text.startsWith("connect_failed:"), true);
+    assertEquals(text.includes("Connection timed out"), true);
+    assertEquals(text.includes("cid 50"), true);
+
+    // The retrying window is the agent's, so it may stop it without confirm.
+    s.fake.setHandler(undefined);
+    const stopped = await s.client.callTool({
+      name: "irc_disconnect",
+      arguments: { network: "irc.dead.example" },
+    });
+    assertEquals(stopped.isError ?? false, false);
+    assertEquals(s.fake.received.find((c) => c.action === "disconnect")?.params?.cid, 50);
+  } finally {
+    await s.stop();
+  }
+});

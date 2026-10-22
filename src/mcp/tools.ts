@@ -261,6 +261,10 @@ const connectSchema = z.object({
   session: sessionArg,
   server: z.string(),
   port: z.int().min(1).max(65535).optional(),
+  tls: z
+    .boolean()
+    .optional()
+    .describe("Connect over TLS (mIRC's +port). The port defaults to 6697 when this is set."),
   password: z.string().optional().describe("Server password, if required. Not logged."),
 });
 const ensureConnectedSchema = z.object({
@@ -271,6 +275,10 @@ const ensureConnectedSchema = z.object({
     .optional()
     .describe("Server to connect to if mIRC is not on that network yet, e.g. irc.rizon.net."),
   port: z.int().min(1).max(65535).optional(),
+  tls: z
+    .boolean()
+    .optional()
+    .describe("Connect over TLS (mIRC's +port). The port defaults to 6697 when this is set."),
   password: z.string().optional().describe("Server password, if required. Not logged."),
 });
 const joinSchema = z.object({
@@ -624,11 +632,15 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
    */
   async function openConnection(
     s: Session,
-    server: string,
-    port: number | undefined,
-    password: string | undefined,
-    network?: string,
+    target: {
+      server: string;
+      port?: number;
+      tls?: boolean;
+      password?: string;
+      network?: string;
+    },
   ): Promise<ToolResult> {
+    const { server, port, tls, password, network } = target;
     const quitWindows = s.state.networks().filter((n) =>
       n.status === "disconnected" &&
       ((network !== undefined && sameNetwork(n.name, network)) ||
@@ -636,19 +648,40 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     );
     const reusable = quitWindows.find((n) => s.owned.ownsConnection(n.cid)) ?? quitWindows[0];
     const usersWindow = reusable !== undefined && !s.owned.ownsConnection(reusable.cid);
+    const before = new Set(s.state.networks().map((n) => n.cid));
+
     const outcome = await s.commands.send(
       "connect",
-      { cid: reusable?.cid, server, port, password },
+      // tls goes as a number: bridge.mrc reads flags with jnum, and only strings are base64.
+      { cid: reusable?.cid, server, port, tls: tls ? 1 : undefined, password },
       // EFNet took 32.6 s to register in the live test: ident and DNS checks.
       { context: "connect", timeoutMs: 60_000 },
     );
-    if (!outcome.ok) return failure(outcome.error);
-    const error = await s.refreshState();
-    if (error) return failure(error);
+
+    // Receipts first, success or not. A connection that never registered still
+    // left a window behind, retrying on its own (seen live: "Connect retry #4"),
+    // and it is the agent's to stop. Taking the receipt only on success left
+    // that window looking like the user's.
+    const refreshError = await s.refreshState();
+    const opened = usersWindow
+      ? []
+      : s.state.networks().filter((n) => !before.has(n.cid) || n.cid === reusable?.cid);
+    for (const n of opened) s.owned.openedConnection(n.cid);
+
+    if (!outcome.ok) {
+      const left = opened.find((n) => n.status !== "disconnected");
+      return failure(
+        left
+          ? {
+            ...outcome.error,
+            hint: `${outcome.error.hint} mIRC may keep retrying in the window it opened ` +
+              `(cid ${left.cid}); that window is the agent's, so irc_disconnect it to stop.`,
+          }
+          : outcome.error,
+      );
+    }
+    if (refreshError) return failure(refreshError);
     const cid = typeof outcome.data?.cid === "number" ? outcome.data.cid : undefined;
-    // A receipt makes the connection the agent's to close again, but a window
-    // the user owned stays the user's after the agent brings it back.
-    if (cid !== undefined && !usersWindow) s.owned.openedConnection(cid);
     const net = cid === undefined ? undefined : s.state.byCid(cid);
     return json({
       skipped: false,
@@ -676,7 +709,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         "through a different server.",
       inputSchema: connectSchema.shape,
     },
-    ({ session, server, port, password }: ConnectArgs) =>
+    ({ session, server, port, tls, password }: ConnectArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
         await freshen(s, stateFreshnessMs);
@@ -684,7 +717,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         if (existing) {
           return json({ skipped: true, reason: "already connected", network: existing });
         }
-        return await openConnection(s, server, port, password);
+        return await openConnection(s, { server, port, tls, password });
       }),
   );
 
@@ -698,7 +731,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         "alongside the existing ones. A live connection is never disconnected or replaced.",
       inputSchema: ensureConnectedSchema.shape,
     },
-    ({ session, network, server, port, password }: EnsureConnectedArgs) =>
+    ({ session, network, server, port, tls, password }: EnsureConnectedArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
         await freshen(s, stateFreshnessMs);
@@ -715,7 +748,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
             ),
           );
         }
-        return await openConnection(s, server, port, password, network);
+        return await openConnection(s, { server, port, tls, password, network });
       }),
   );
 

@@ -327,7 +327,7 @@ alias -l bridge_command {
   ; Port is always passed (0 for none) so a password cannot shift into its slot.
   ; Numbers are not encoded, so the port is read with jnum.
   ; A cid on connect means "reconnect that window" (already selected above).
-  if (%act == connect) { bridge_do_connect %id $jparam(%f, server) $iif($jnum(%f, port), $v1, 0) $iif(%cid != $null, 1, 0) $jparam(%f, password) | return }
+  if (%act == connect) { bridge_do_connect %id $jparam(%f, server) $iif($jnum(%f, port), $v1, 0) $iif(%cid != $null, 1, 0) $iif($jnum(%f, tls), 1, 0) $jparam(%f, password) | return }
   if (%act == raw) { bridge_do_raw %id $jparam(%f, line) | return }
   if (%act == nick) { bridge_do_nick %id $jparam(%f, nick) | return }
   if (%act == disconnect) { bridge_do_disconnect %id $jparam(%f, message) | return }
@@ -511,7 +511,10 @@ alias -l bridge_do_echo {
 ; --- connect / raw --------------------------------------------------------
 
 ; $1 = id, $2 = server, $3 = port (0 for default), $4 = 1 to reconnect the
-; current window, $5- = password
+; current window, $5 = 1 for TLS, $6- = password
+;
+; TLS is mIRC's own notation: a + before the port (/server host +6697), with
+; 6697 as the default TLS port.
 ;
 ; Normally a NEW connection: /server -m opens another connection window. Plain
 ; /server reuses the current window, which disconnected whatever the user was
@@ -523,17 +526,18 @@ alias -l bridge_do_echo {
 ; after, which works whichever window /server -m leaves active.
 alias -l bridge_do_connect {
   if (!$2) { bridge_fail $1 0 missing-server | return }
-  var %port = $iif($3, $3, 6667)
+  var %port = $iif($3, $3, $iif($5 == 1, 6697, 6667))
+  if ($5 == 1) %port = + $+ %port
   if ($4 == 1) {
     if ($status != disconnected) { bridge_fail $1 0 connection-busy | return }
     set -e %bridge_conn_id $1
     set -e %bridge_conn_cid $cid
-    if ($5- != $null) server $2 %port $5-
+    if ($6- != $null) server $2 %port $6-
     else server $2 %port
     return
   }
   var %before = $bridge_cids
-  if ($5- != $null) server -m $2 %port $5-
+  if ($6- != $null) server -m $2 %port $6-
   else server -m $2 %port
   var %new, %i = 1
   while (%i <= $scon(0)) {
@@ -581,6 +585,10 @@ alias bridge_nick_timeout {
 ; quits; mIRC or the user can close it.
 alias -l bridge_do_disconnect {
   if ($status == disconnected) { bridge_ok $1 $kvo(already, true) | return }
+  ; Still connecting or retrying: nothing to quit from, so cancel the attempt.
+  ; No DISCONNECT is certain to follow, so answer now; the daemon re-reads
+  ; the state afterwards.
+  if ($status != connected) { disconnect | bridge_ok $1 $kvo(cancelled, true) | return }
   set -e %bridge_quit_id $1
   set -e %bridge_quit_cid $cid
   .timerbridgequit 1 12 bridge_quit_timeout
@@ -611,6 +619,24 @@ on *:CONNECT: {
     var %id = %bridge_conn_id
     unset %bridge_conn_id %bridge_conn_cid
     bridge_ok %id $kvo(cid, $cid)
+  }
+}
+
+; A connection attempt that fails before it registers (timed out, refused,
+; unresolvable) fires neither CONNECT nor DISCONNECT. In the live test mIRC
+; printed "Unable to connect to server (Connection timed out)" four times while
+; the daemon heard nothing until its 60 s timeout. $1- is mIRC's reason.
+; mIRC goes on retrying by itself; the agent can stop it with irc_disconnect.
+; NOT WORKING in mIRC 7.85 (2026-10-22): it fired for none of ten instant TLS
+; failures ("SSL certificate verify failed") nor for connection timeouts. Kept
+; because it is harmless if it never fires; a failed connect therefore still
+; ends in the daemon's 60 s timeout, whose hint names the window to stop.
+on *:CONNECTFAIL: {
+  if ($sock(bridge)) bridge_send $evp(conn) $+ $chr(44) $+ $kvo(extra, $chr(123) $+ $kvo(event, $jstr(connect_failed)) $+ $chr(44) $+ $kvo(reason, $jstr($1-)) $+ $chr(125)) $+ $chr(125)
+  if ($var(%bridge_conn_id) && $cid == %bridge_conn_cid) {
+    var %id = %bridge_conn_id
+    unset %bridge_conn_id %bridge_conn_cid
+    bridge_fail %id 0 $1-
   }
 }
 

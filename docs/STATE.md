@@ -18,7 +18,7 @@ Proven by running it, with evidence in the log:
   daemon's state model then holds the network, the joined channel and member counts.
 - **Daemon runs**: `deno task start` binds `127.0.0.1:8686` (mIRC, raw TCP) and `127.0.0.1:8687`
   (agents, HTTP). `/health` is unauthenticated, `/status` and `/mcp` require the bearer token.
-- **216 automated tests** (`deno task test`): MBP framing including CRLF and oversize rejection,
+- **218 automated tests** (`deno task test`): MBP framing including CRLF and oversize rejection,
   logging with redaction, the state model, the event log and waits, credit-limited command dispatch,
   the failure taxonomy, DCC outcome tracking, the listener, config, the INI reader, the HTTP door,
   the 20-tool MCP surface driven by the SDK's own client, and the frame shapes `bridge.mrc` emits
@@ -108,6 +108,16 @@ Proven by running it, with evidence in the log:
     arrived intact on the right connection, buffered under the bot's nick.
   - That delay is why jobs are now tracked in the background and no tool waits more than 55 s
     (ADR-0010 amendment).
+- **Failed connects, TLS and cancelling** (2026-10-22, `irc.williamgattone.it`):
+  - Port 6667 timed out, and mIRC retried by itself indefinitely ("Connect retry #4…"). The daemon
+    heard nothing and timed out at 60 s.
+  - `tls: true` reached mIRC as `"tls":1` and dialled `+6697`. The server answered, but mIRC
+    rejected its certificate ("SSL certificate verify failed", ten retries).
+  - The window a failed connect opens is now receipted, so the agent owned it, and `irc_disconnect`
+    cancelled the retry loop in 44 ms. mIRC printed "Connect canceled".
+  - **`on CONNECTFAIL` does not fire** in 7.85: not for timeouts, not for ten instant certificate
+    failures. A connect to an unreachable server therefore ends in the 60 s timeout, whose hint
+    names the agent's window to stop. The handler is kept because it is harmless.
 
 ## Not verified
 
@@ -126,9 +136,10 @@ Carried over:
    the hint names the current nick and any services rename.
 
 **XDCC end-to-end (phase 3) has never seen a real transfer.** The next live run is a Linux
-distribution bot: `irc.williamgattone.it`, `#William&Gattone`, bot `WG|LinuxOs|01`, pack #1. First
-confirm the pack is a Linux image (from the list, or the bot's "Sending you pack" reply). Then
-check:
+distribution bot: `irc.williamgattone.it` with `tls: true` (its certificate does not verify, so the
+user has turned on mIRC's "accept invalid certificates"), `#William&Gattone`, bot `WG|LinuxOs|01`,
+pack #1. First confirm the pack is a Linux image (from the list, or the bot's "Sending you pack"
+reply). Then check:
 
 1. Joining a channel whose name contains `&`, and messaging a nick containing `|` (mSL's command
    separator), both work.
