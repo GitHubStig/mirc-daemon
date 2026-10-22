@@ -47,21 +47,30 @@ Proven by running it, with evidence in the log:
   - With the daemon restarted mid-session, `SOCKCLOSE` reattached it within 5 s.
   - mIRC says each transition exactly once: "lost the daemon connection, retrying every 5s", then
     "reconnected to the daemon".
+- **Other people's traffic** (2026-10-22): a coloured channel line from another nick
+  (`\x034Hello world`) arrived with its `\x03` intact, and a NOTICE to us was buffered under the
+  **sender's** nick. Not one inbound line since the v2 script was loaded carried an unescaped
+  control character, so `jstr` does the work and the daemon's fallback never fires.
+- **A large channel** (2026-10-22): `irc_members` on `#2600` (385 users) answered in 50 ms with
+  `truncated: true`. mIRC stopped at 288 names in a 2,584-byte frame, under the 3,500 limit, and the
+  tool returned 200 of them.
+- **Join, part and raw numerics** (2026-10-22, the fixes the live run itself found):
+  - `irc_part` on `#2600` answered in 216 ms, only once the server echoed our PART.
+  - `irc_join` sent straight after it really joined, answered on `raw 366` in 453 ms with
+    `members: 384` and no `weak_match` warning. Before the fix it reported 1.
+  - Raw events arrive as `"<numeric> <params>"` with `extra.numeric`: 332, 333, 353, 366, 324 and
+    329 were all seen.
 
 ## Not verified
 
-Assumed or untested. Treat these as the actual risk surface. The remaining live checks for the audit
-fixes, in order:
+Assumed or untested. Treat these as the actual risk surface. The remaining live checks:
 
-1. Someone **else** sends a bold or coloured line, or a NOTICE: it shows in `irc_read` with its
-   formatting codes, and `deno task log:tail` shows no `mbp.bad-frame`. (Our own echo proved the
-   TEXT path, not NOTICE.)
-2. `irc_join` on a channel that refuses you fails with a code within 8s.
-3. `irc_members` on a large channel returns `truncated: true` rather than timing out.
-4. `irc_connect` while already connected: no spurious `connect_failed` before the new connection
-   comes up (see `%bridge_conn_skipdc`).
-5. A private message **from someone else** lands in `irc_read` with `buffer` set to the sender's
-   nick. (Messaging ourselves cannot tell the two apart.)
+1. `irc_join` on a channel that refuses you fails with a code within 8s, **and** the refusal also
+   appears as a raw event. This needs a `+i` or `+k` channel held by someone else.
+2. `irc_connect` while already connected: no spurious `connect_failed` before the new connection
+   comes up (see `%bridge_conn_skipdc`). This interrupts the session.
+3. A private `/msg` (not a notice) from someone else is buffered under the sender's nick. It uses
+   the same `bridge_buf` as NOTICE, which is verified, so this is a formality.
 
 Beyond those:
 
@@ -73,7 +82,7 @@ Beyond those:
   needs `/scon -r` per connection.
 - **`raw` gating** is implemented as default-deny but only exercised as "denied".
 
-## Six traps that all failed silently
+## Traps that all failed silently
 
 Every one of these looked like "nothing happened", not like an error. They are recorded here so they
 are not reintroduced.
@@ -104,6 +113,24 @@ Found by audit rather than by running it, and fixed in the same silent shape:
    construction (ADR-0002).
 9. **A pattern with a literal `|` is two commands.** Any regex alternation in mSL is built with
    `$chr(124)`.
+
+Found by the live run, invisible to every test because the test double was shaped by assumption:
+
+10. **Only the first matching event in a script file fires.** A `raw 473` handler means `raw *:*`
+    never sees a 473, so the refusals an agent most needs were the ones never forwarded. Every
+    specific raw handler calls `bridge_mirror_raw` itself.
+11. **A raw event's `$1-` is not the server line.** It has no prefix and no numeric; the numeric is
+    in `$numeric`. Raw events reached agents with no way to tell a 401 from a 322 until the numeric
+    was sent alongside.
+12. **JOIN fires before the member list.** `$nick($chan, 0)` in `on JOIN` is 1, so every fresh join
+    reported an empty channel. A join is answered on `raw 366` (end of NAMES) instead.
+13. **`if (!$a(x) || !$b(y, z))` is "invalid format" in mIRC 7.85.** Negating identifier _calls_
+    inside a compound condition aborts the handler. The only trace is an untimestamped line in
+    mIRC's status window, and the daemon just sees a timeout. Argument-less negations
+    (`!$bridge_host || !$bridge_port`) and a single `if (!$var(%x))` do parse. Write compound
+    conditions positively (`$var(%x) && $istok(...)`).
+14. **`/part` returns before the server confirms.** Replying at once let a join sent straight after
+    it find us still in the channel and skip the join. A part is answered on our own `PART` event.
 
 ## Running it
 

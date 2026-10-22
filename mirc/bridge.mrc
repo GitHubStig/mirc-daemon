@@ -413,10 +413,22 @@ alias bridge_join_timeout {
   bridge_fail %id 0 join-timeout
 }
 
+; Answered when the server echoes our PART, not when /part is issued. Replying
+; at once let a join sent straight after it find us still in the channel and
+; answer `already: true` without joining.
 alias -l bridge_do_part {
   if (!$chan($2)) { bridge_fail $1 0 not-on-channel | return }
+  set %bridge_part_id $1
+  set %bridge_part_chan $2
+  .timerbridgepart 1 8 bridge_part_timeout
   part $2
-  bridge_ok $1
+}
+
+alias bridge_part_timeout {
+  if (!$var(%bridge_part_id)) return
+  var %id = %bridge_part_id
+  unset %bridge_part_id %bridge_part_chan
+  bridge_fail %id 0 part-timeout
 }
 
 ; --- speaking -------------------------------------------------------------
@@ -484,31 +496,52 @@ on *:DISCONNECT: {
 }
 
 on *:JOIN:#: {
-  if ($nick == $me && $var(%bridge_join_id) && $istok(%bridge_join_chan, $chan, 32)) {
+  ; The join is not answered here: mIRC fires JOIN before the server has sent
+  ; the member list, so $nick($chan, 0) is 1 (just us) and every fresh join
+  ; was reported as a near-empty channel. raw 366 answers it instead.
+  if ($sock(bridge)) bridge_send $evp(join) $+ $chr(44) $+ $kvo(buf, $jstr($chan)) $+ $chr(44) $+ $kvo(nick, $jstr($nick)) $+ $chr(125)
+}
+
+; End of NAMES: :server 366 me #chan :End of /NAMES list. The member list is
+; complete now, so this is where a pending join is answered. It arrived 2 ms
+; after JOIN on EFNet. A redirected join never matches and falls to the timer.
+;
+; The condition is deliberately positive. `!$var(...) || !$istok(...)` was
+; rejected by mIRC 7.85 with "/if: invalid format", which aborted the handler
+; and left every join to time out. `$var(...) && $istok(...)` is the form the
+; old JOIN handler used and is known to parse.
+raw 366:*:{
+  bridge_mirror_raw $numeric $1-
+  if ($var(%bridge_join_id) && $istok(%bridge_join_chan, $2, 32)) {
     var %id = %bridge_join_id
     .timerbridgejoin off
     unset %bridge_join_id %bridge_join_chan
-    bridge_ok %id $kvo(joined, $jstr($chan)) $+ $chr(44) $+ $kvo(members, $nick($chan, 0))
+    bridge_ok %id $kvo(joined, $jstr($2)) $+ $chr(44) $+ $kvo(members, $nick($2, 0))
   }
-  if ($sock(bridge)) bridge_send $evp(join) $+ $chr(44) $+ $kvo(buf, $jstr($chan)) $+ $chr(44) $+ $kvo(nick, $jstr($nick)) $+ $chr(125)
 }
 
 ; The refusals IRC actually reports: 403 no such channel, 405 too many channels,
 ; 437 temporarily unavailable, 471 full, 473 invite-only, 474 banned, 475 key,
 ; 477 registered nick required, 489 TLS-only. Anything else is caught by the
 ; join timer. These only act while a join is pending.
-raw 403:*:{ bridge_join_failed 403 $2- }
-raw 405:*:{ bridge_join_failed 405 $2- }
-raw 437:*:{ bridge_join_failed 437 $2- }
-raw 489:*:{ bridge_join_failed 489 $2- }
-raw 471:*:{ bridge_join_failed 471 $2- }
-raw 473:*:{ bridge_join_failed 473 $2- }
-raw 474:*:{ bridge_join_failed 474 $2- }
-raw 475:*:{ bridge_join_failed 475 $2- }
-raw 477:*:{ bridge_join_failed 477 $2- }
+;
+; Every specific raw handler also mirrors its line. Only the FIRST matching
+; raw event in a script file fires, so a numeric with its own handler never
+; reaches `raw *:*` below -- the refusal an agent most needs to see would
+; otherwise be the one it never gets.
+raw 403:*:{ bridge_mirror_raw $numeric $1- | bridge_join_failed 403 $2- }
+raw 405:*:{ bridge_mirror_raw $numeric $1- | bridge_join_failed 405 $2- }
+raw 437:*:{ bridge_mirror_raw $numeric $1- | bridge_join_failed 437 $2- }
+raw 489:*:{ bridge_mirror_raw $numeric $1- | bridge_join_failed 489 $2- }
+raw 471:*:{ bridge_mirror_raw $numeric $1- | bridge_join_failed 471 $2- }
+raw 473:*:{ bridge_mirror_raw $numeric $1- | bridge_join_failed 473 $2- }
+raw 474:*:{ bridge_mirror_raw $numeric $1- | bridge_join_failed 474 $2- }
+raw 475:*:{ bridge_mirror_raw $numeric $1- | bridge_join_failed 475 $2- }
+raw 477:*:{ bridge_mirror_raw $numeric $1- | bridge_join_failed 477 $2- }
 
 ; ISON reply: :server 303 me :nick1 nick2
 raw 303:*:{
+  bridge_mirror_raw $numeric $1-
   if (!$var(%bridge_ison_id)) return
   var %id = %bridge_ison_id, %asked = %bridge_ison_list, %out
   .timerbridgeison off
@@ -527,10 +560,18 @@ raw 303:*:{
 
 ; --- IRC -> daemon: the mirror -------------------------------------------
 
-raw *:*: {
+raw *:*: { bridge_mirror_raw $numeric $1- }
+
+; $1 = the numeric, $2- = what mIRC gives a raw event as $1-: the parameters,
+; starting with our nick, with no server prefix and no colon before the last
+; one. mIRC keeps the numeric apart in $numeric, so without passing it along a
+; 401 "no such nick" arrived as "me nobody No such nick" -- no way to tell
+; which reply it was. The line becomes "401 me nobody No such nick", and the
+; numeric is also sent on its own in extra.numeric, so nobody has to parse it.
+alias -l bridge_mirror_raw {
   if (!$sock(bridge)) return
   if ($len($1-) > 3000) return
-  bridge_send $evp(raw) $+ $chr(44) $+ $kvo(raw, $jstr($1-)) $+ $chr(125)
+  bridge_send $evp(raw) $+ $chr(44) $+ $kvo(raw, $jstr($1-)) $+ $chr(44) $+ $kvo(extra, $chr(123) $+ $kvo(numeric, $iif($1 isnum, $1, 0)) $+ $chr(125)) $+ $chr(125)
 }
 
 ; For a private message $target is our own nick, so the buffer is named after
@@ -567,6 +608,13 @@ on *:NICK: {
 }
 
 on *:PART:#: {
+  ; Same positive && form as raw 366, which mIRC is known to parse.
+  if ($nick == $me && $var(%bridge_part_id) && $istok(%bridge_part_chan, $chan, 32)) {
+    var %id = %bridge_part_id
+    .timerbridgepart off
+    unset %bridge_part_id %bridge_part_chan
+    bridge_ok %id $kvo(parted, $jstr($chan))
+  }
   if (!$sock(bridge)) return
   bridge_send $evp(part) $+ $chr(44) $+ $kvo(buf, $jstr($chan)) $+ $chr(44) $+ $kvo(nick, $jstr($nick)) $+ $chr(44) $+ $kvo(text, $jstr($1-)) $+ $chr(125)
 }

@@ -13,6 +13,7 @@
 import { assertEquals } from "@std/assert";
 import { nullLogger } from "../src/core/log.ts";
 import { toWireCommand } from "../src/core/wire.ts";
+import { waitForEvent } from "../src/core/waits.ts";
 import { type RunningMircListener, startMircListener } from "../src/mirc/listener.ts";
 import { until } from "./fake_mirc.ts";
 
@@ -247,18 +248,33 @@ Deno.test("the event shapes bridge.mrc emits land in the right places", async ()
     h.mirc.send({ t: "ev", kind: "selfnick", net: "net1", extra: { old: "me", new: "me_" } });
     await until(() => session.state.resolve().nick === "me_", { label: "nick adopted" });
 
+    // The shape bridge_mirror_raw really sends. An earlier version of this test
+    // used a full server line (":server 401 me nobody :No such nick"), which
+    // mIRC never produces: a raw event's $1- has no prefix and no numeric, and
+    // the missing numeric went unnoticed until a live /LIST showed it.
     h.mirc.send({
       t: "ev",
       kind: "raw",
       net: "net1",
-      raw: ":server 401 me nobody :No such nick",
+      raw: "401 me nobody No such nick",
+      extra: { numeric: 401 },
     });
     await until(() => session.log.snapshot().some((e) => e.kind === "raw"), {
       label: "raw event",
     });
     // The line itself must survive, not just the fact that one arrived.
     const raw = session.log.snapshot().find((e) => e.kind === "raw");
-    assertEquals(raw?.raw, ":server 401 me nobody :No such nick");
+    assertEquals(raw?.raw, "401 me nobody No such nick");
+    assertEquals(raw?.extra?.numeric, 401);
+    // An agent waiting on a refusal can match it by its number.
+    const waited = await waitForEvent({
+      log: session.log,
+      bus: session.bus,
+      matcher: { kind: "raw", pattern: "401 " },
+      since: 0,
+      timeoutMs: 100,
+    });
+    assertEquals(waited?.extra?.numeric, 401);
   } finally {
     await h.stop();
   }

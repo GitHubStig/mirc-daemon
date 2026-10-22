@@ -157,7 +157,12 @@ export interface EventFrame {
   nick?: string;
   user?: string;
   text?: string;
-  /** The whole server line, for `kind === "raw"`. */
+  /**
+   * For `kind === "raw"`: the numeric, then its parameters as mIRC hands them to
+   * a raw event — starting with our nick, with no server prefix and no colon
+   * before the last parameter, e.g. "401 me nobody No such nick". The numeric is
+   * also in `extra.numeric`.
+   */
   raw?: string;
   /** kind-specific payload: nick change, conn state, dcc outcome, etc. */
   extra?: Record<string, unknown>;
