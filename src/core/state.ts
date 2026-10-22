@@ -28,7 +28,7 @@ export class StateModel {
   applyStateFrame(networks: readonly NetworkState[]): void {
     this.#networks.clear();
     for (const net of networks) {
-      this.#networks.set(net.name, {
+      this.#networks.set(networkKey(net.name), {
         ...net,
         channels: [...net.channels],
         members: { ...(net.members ?? {}) },
@@ -43,7 +43,7 @@ export class StateModel {
    * describe it properly.
    */
   applyEvent(event: BridgeEvent): void {
-    const net = this.#networks.get(event.net);
+    const net = this.#networks.get(networkKey(event.net));
     if (!net) return;
 
     switch (event.kind) {
@@ -99,7 +99,7 @@ export class StateModel {
   }
 
   find(name: string): NetworkState | undefined {
-    return this.#networks.get(name);
+    return this.#networks.get(networkKey(name));
   }
 
   /**
@@ -109,7 +109,7 @@ export class StateModel {
    */
   resolve(name?: string): NetworkState {
     if (name !== undefined) {
-      const net = this.#networks.get(name);
+      const net = this.#networks.get(networkKey(name));
       if (net) return net;
       throw new BridgeFailure(
         bridgeError(
@@ -158,6 +158,15 @@ export class StateModel {
     const key = findMemberKey(net, channel);
     return key === undefined ? undefined : net.members[key];
   }
+}
+
+/**
+ * Map key for a network: its name lowercased, since servers on one network
+ * disagree on its spelling (see sameNetwork). The stored record keeps the
+ * spelling mIRC reported, for display.
+ */
+function networkKey(name: string): string {
+  return name.toLowerCase();
 }
 
 /** The stored channel name matching `channel`, ignoring case. */

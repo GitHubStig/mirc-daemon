@@ -73,6 +73,16 @@ export class BridgeFailure extends Error {
 
 export type NetworkStatus = "connected" | "connecting" | "disconnected";
 
+/**
+ * Network names compare case-insensitively. Each server announces its own
+ * spelling in ISUPPORT, and they disagree within one network: EFNet reached
+ * through one server and EFnet through irc.efnet.org. Matching exactly turned
+ * a reconnect into `unknown_network` for an agent holding the old spelling.
+ */
+export function sameNetwork(a: string | undefined, b: string | undefined): boolean {
+  return a !== undefined && b !== undefined && a.toLowerCase() === b.toLowerCase();
+}
+
 export interface NetworkState {
   name: string;
   server?: string;

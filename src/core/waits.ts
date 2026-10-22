@@ -15,7 +15,7 @@
  * call would otherwise mean waiting forever and timing out.
  */
 
-import type { BridgeEvent, EventKind } from "./types.ts";
+import { type BridgeEvent, type EventKind, sameNetwork } from "./types.ts";
 import type { EventBus } from "./bus.ts";
 import type { EventLog } from "./buffers.ts";
 
@@ -46,7 +46,7 @@ export function isChannelBuffer(buf: string | undefined): boolean {
 export function matchesWait(event: BridgeEvent, matcher: WaitMatcher): boolean {
   if (matcher.kind !== undefined && event.kind !== matcher.kind) return false;
   if (matcher.direct && isChannelBuffer(event.buf)) return false;
-  if (matcher.net !== undefined && event.net !== matcher.net) return false;
+  if (matcher.net !== undefined && !sameNetwork(event.net, matcher.net)) return false;
   if (matcher.buf !== undefined && !sameIgnoreCase(event.buf, matcher.buf)) return false;
   if (matcher.nick !== undefined && !sameIgnoreCase(event.nick, matcher.nick)) return false;
   if (matcher.pattern !== undefined) {

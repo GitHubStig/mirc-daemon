@@ -98,3 +98,10 @@ Deno.test("keep: oldest pages forward instead of skipping to the newest", () => 
   assertEquals(log.since(1, { limit: 2, keep: "oldest" }).map((e) => e.text), ["m2", "m3"]);
   assertEquals(log.since(1, { limit: 2 }).map((e) => e.text), ["m4", "m5"]);
 });
+
+Deno.test("a read filtered by network matches regardless of case", () => {
+  const log = new EventLog();
+  log.append(at({ kind: "text", net: "EFnet", text: "kept" }));
+  log.append(at({ kind: "text", net: "Rizon", text: "dropped" }));
+  assertEquals(log.since(0, { net: "EFNet" }).map((e) => e.text), ["kept"]);
+});

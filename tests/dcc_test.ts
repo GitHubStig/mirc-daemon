@@ -98,3 +98,12 @@ Deno.test("the tracker remembers a bounded number of jobs", () => {
   // The most recent request is always the one `latest` reports.
   assertEquals(tracker.latest()?.requestedBy?.bot, "bot149");
 });
+
+Deno.test("a DCC outcome closes the job even when the network is spelt differently", () => {
+  const tracker = new DccTracker();
+  const job = tracker.start({ net: "EFNet", bot: "Bot", pack: "1" });
+  tracker.applyEvent(dccEvent("complete", { file: "a.mkv" }, "EFnet"));
+  assertEquals(job.state, "complete");
+  // It attached to the requested job rather than opening an anonymous one.
+  assertEquals(tracker.list().length, 1);
+});

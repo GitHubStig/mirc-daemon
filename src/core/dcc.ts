@@ -10,7 +10,7 @@
  * "no transfer ever started" case is visible rather than silent.
  */
 
-import type { BridgeEvent, DccJob, DccState } from "./types.ts";
+import { type BridgeEvent, type DccJob, type DccState, sameNetwork } from "./types.ts";
 
 export interface DccRequest {
   net: string;
@@ -50,7 +50,7 @@ export class DccTracker {
     const state = stateFromEvent(event);
     if (!state) return undefined;
 
-    const job = this.#jobs.find((j) => j.net === event.net && j.state === "in_flight") ??
+    const job = this.#jobs.find((j) => sameNetwork(j.net, event.net) && j.state === "in_flight") ??
       this.#openFromEvent(event);
 
     job.state = state;

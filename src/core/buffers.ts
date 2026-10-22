@@ -13,7 +13,7 @@
  * simpler end of that choice.
  */
 
-import type { BridgeEvent, EventKind } from "./types.ts";
+import { type BridgeEvent, type EventKind, sameNetwork } from "./types.ts";
 
 export interface LogQuery {
   net?: string;
@@ -92,7 +92,7 @@ export class EventLog {
 }
 
 function matchesQuery(event: BridgeEvent, query: LogQuery): boolean {
-  if (query.net !== undefined && event.net !== query.net) return false;
+  if (query.net !== undefined && !sameNetwork(event.net, query.net)) return false;
   if (query.buf !== undefined && event.buf !== query.buf) return false;
   if (query.kinds && !query.kinds.includes(event.kind)) return false;
   return true;

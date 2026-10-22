@@ -166,3 +166,10 @@ Deno.test("a direct matcher ignores the bot's channel adverts and takes its noti
   // A CTCP carries no buffer at all, and is still addressed to us.
   assertEquals(matchesWait(ctcp, matcher), true);
 });
+
+Deno.test("a wait's network matches regardless of case", () => {
+  const { record } = harness();
+  const event = record({ kind: "text", net: "EFnet", buf: "#chan", nick: "bot", text: "hi" });
+  assertEquals(matchesWait(event, { net: "EFNet" }), true);
+  assertEquals(matchesWait(event, { net: "Rizon" }), false);
+});

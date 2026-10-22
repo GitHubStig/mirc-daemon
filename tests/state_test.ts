@@ -135,3 +135,18 @@ Deno.test("freshness reflects whether mIRC has confirmed the picture recently", 
   assertEquals(state.isStale(-1), true);
   assertEquals(typeof state.lastRefreshTs, "number");
 });
+
+Deno.test("network names match regardless of the spelling a server announces", () => {
+  // Seen live: one EFNet server says "EFNet", irc.efnet.org says "EFnet".
+  const model = new StateModel();
+  model.applyStateFrame([network({ name: "EFNet", channels: [] })]);
+
+  const net = model.resolve("EFnet");
+  // mIRC's own spelling is kept for display.
+  assertEquals(net.name, "EFNet");
+  assertEquals(model.find("efnet")?.name, "EFNet");
+
+  // Events tagged with the other spelling still update the same network.
+  model.applyEvent({ seq: 1, ts: 0, kind: "join", net: "EFnet", buf: "#chan", nick: net.nick });
+  assertEquals(model.isJoined(model.resolve("EFNET"), "#chan"), true);
+});
