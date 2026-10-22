@@ -63,6 +63,15 @@ export function startMcp(options: McpOptions): RunningMcp {
 
   return {
     async handle(request: Request): Promise<Response> {
+      // Only POST carries work. A client opens GET /mcp for server-initiated
+      // messages, and this daemon never sends any; answered by the transport,
+      // that GET became an event stream that never ended, one per agent, and
+      // the HTTP server's shutdown then waited on it forever. The spec's answer
+      // for a server without that stream is 405, which the SDK client accepts
+      // as "no stream". DELETE ends a session, and stateless has none.
+      if (request.method !== "POST") {
+        return new Response(null, { status: 405, headers: { allow: "POST" } });
+      }
       const server = build();
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined,

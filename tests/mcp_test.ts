@@ -778,3 +778,26 @@ Deno.test("a 477 refusal after a services rename tells the agent what to tell th
     await s.stop();
   }
 });
+
+Deno.test("GET and DELETE on /mcp are 405, so no endless event stream is ever opened", async () => {
+  const s = await stack();
+  try {
+    for (const method of ["GET", "DELETE"]) {
+      const response = await fetch(`http://127.0.0.1:${s.http.addr.port}/mcp`, {
+        method,
+        headers: { authorization: `Bearer ${TOKEN}`, accept: "text/event-stream" },
+      });
+      await response.body?.cancel();
+      assertEquals(response.status, 405, method);
+      assertEquals(response.headers.get("allow"), "POST");
+    }
+    // The SDK client copes: tools still work after its GET was refused.
+    const result = await s.client.callTool({ name: "daemon_status", arguments: {} });
+    assertEquals(JSON.parse(textOf(result)).mircAttached, true);
+  } finally {
+    // Shutdown used to be able to hang here, waiting on that stream.
+    const started = Date.now();
+    await s.stop();
+    assertEquals(Date.now() - started < 2000, true);
+  }
+});
