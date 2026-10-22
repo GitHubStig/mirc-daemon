@@ -45,9 +45,10 @@ const INSTRUCTIONS = [
   "rather than polling irc_read: it returns the moment a matching message arrives.",
   "Every tool reports failures as a stable code plus a plain-English hint.",
   "",
-  "mIRC is a person's own client. Their connections and channels are theirs: you may",
-  "use them, but leave a channel, disconnect or change nick there only when they asked",
-  "(confirm: true). What you opened or joined yourself you may close freely. Never send",
+  "mIRC is a person's own client. You may use their connections and channels. Leave a",
+  "channel, disconnect or change nick only when they asked, or the task they gave",
+  "includes it; a finished transfer alone is not a reason. On what you opened or joined",
+  "yourself that needs no confirmation; on theirs, pass confirm: true. Never send",
   "anything that marks the traffic as automated.",
 ].join("\n");
 

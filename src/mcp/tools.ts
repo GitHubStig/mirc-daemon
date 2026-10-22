@@ -23,6 +23,7 @@ import {
   type DaemonStatus,
   EVENT_KINDS,
   type NetworkState,
+  sameNetwork,
 } from "../core/types.ts";
 import type { Session, SessionRegistry } from "../core/sessions.ts";
 import { emptyChannelWarning } from "../core/outcomes.ts";
@@ -548,19 +549,36 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
   // --- connecting and joining -------------------------------------------
 
   /**
-   * Open a NEW connection and wait for it to finish registering. bridge.mrc
-   * uses `/server -m`, which adds a connection window; the old `/server`
-   * reused the active one, which dropped whatever the user was connected to.
+   * Connect and wait for registration, in an existing quit window for that
+   * network if there is one, otherwise in a new one.
+   *
+   * mIRC keeps a connection's window after it quits, so opening a new window
+   * (`/server -m`) on every trip piled up disconnected windows for the same
+   * network. A quit window for the network is reconnected in place instead:
+   * the agent's own first, then the user's. Reconnecting the user's window
+   * earns no receipt, so it stays theirs and the agent cannot disconnect it
+   * without confirmation. The one visible difference from a new window: mIRC
+   * may rejoin channels that were still open in it when the user quit.
+   * Nothing still connected is ever a candidate, and bridge.mrc refuses to
+   * reconnect a window that is not disconnected, whatever it is asked.
    */
   async function openConnection(
     s: Session,
     server: string,
     port: number | undefined,
     password: string | undefined,
+    network?: string,
   ): Promise<ToolResult> {
+    const quitWindows = s.state.networks().filter((n) =>
+      n.status === "disconnected" &&
+      ((network !== undefined && sameNetwork(n.name, network)) ||
+        (n.server !== undefined && n.server.toLowerCase() === server.toLowerCase()))
+    );
+    const reusable = quitWindows.find((n) => s.owned.ownsConnection(n.cid)) ?? quitWindows[0];
+    const usersWindow = reusable !== undefined && !s.owned.ownsConnection(reusable.cid);
     const outcome = await s.commands.send(
       "connect",
-      { server, port, password },
+      { cid: reusable?.cid, server, port, password },
       // EFNet took 32.6 s to register in the live test: ident and DNS checks.
       { context: "connect", timeoutMs: 60_000 },
     );
@@ -568,10 +586,15 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     const error = await s.refreshState();
     if (error) return failure(error);
     const cid = typeof outcome.data?.cid === "number" ? outcome.data.cid : undefined;
-    // A receipt: this connection is the agent's to close again.
-    if (cid !== undefined) s.owned.openedConnection(cid);
-    const network = cid === undefined ? undefined : s.state.byCid(cid);
-    return json({ skipped: false, network });
+    // A receipt makes the connection the agent's to close again, but a window
+    // the user owned stays the user's after the agent brings it back.
+    if (cid !== undefined && !usersWindow) s.owned.openedConnection(cid);
+    const net = cid === undefined ? undefined : s.state.byCid(cid);
+    return json({
+      skipped: false,
+      reusedWindow: reusable === undefined ? false : usersWindow ? "user's" : "agent's",
+      network: net,
+    });
   }
 
   /** A connection already serving `server` or `network`, if mIRC has one up. */
@@ -610,8 +633,9 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     {
       description:
         "Make sure mIRC is on a network. If any connection to that network (or that server) is " +
-        "up, including one the user opened, it is reused. Otherwise a new connection is opened " +
-        "alongside the existing ones, never replacing them.",
+        "up, including one the user opened, it is reused. Otherwise a quit window for that " +
+        "network is reconnected (the user's stays the user's), or a new connection is opened " +
+        "alongside the existing ones. A live connection is never disconnected or replaced.",
       inputSchema: ensureConnectedSchema.shape,
     },
     ({ session, network, server, port, password }: EnsureConnectedArgs) =>
@@ -631,7 +655,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
             ),
           );
         }
-        return await openConnection(s, server, port, password);
+        return await openConnection(s, server, port, password, network);
       }),
   );
 
@@ -704,8 +728,9 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     "irc_part",
     {
       description:
-        "Leave a channel. Free for channels the agent joined itself; the user's own channels " +
-        "need confirm: true, only when the user asked.",
+        "Leave a channel, only when the user asked or the task they gave includes leaving. " +
+        "Never tidy up on your own initiative. Channels the agent joined itself need no " +
+        "confirmation; the user's own channels need confirm: true.",
       inputSchema: partSchema.shape,
     },
     ({ session, network, channel, confirm }: PartArgs) =>
@@ -723,9 +748,10 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     "irc_disconnect",
     {
       description:
-        "Disconnect from a network. Free for connections the agent opened itself; the user's " +
-        "own connections need confirm: true, only when the user asked. Quits with mIRC's own " +
-        "default message unless one is given, so it looks like a person quitting.",
+        "Disconnect from a network, only when the user asked or the task they gave includes it " +
+        "(e.g. 'get pack 5, then disconnect'). A finished transfer is NOT a reason to disconnect " +
+        "by itself. Connections the agent opened need no confirmation; the user's own need " +
+        "confirm: true. Quits with mIRC's own default message unless one is given.",
       inputSchema: disconnectSchema.shape,
     },
     ({ session, network, message, confirm }: DisconnectArgs) =>

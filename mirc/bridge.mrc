@@ -326,7 +326,8 @@ alias -l bridge_command {
   if (%act == echo) { bridge_do_echo %id $jparam(%f, text) | return }
   ; Port is always passed (0 for none) so a password cannot shift into its slot.
   ; Numbers are not encoded, so the port is read with jnum.
-  if (%act == connect) { bridge_do_connect %id $jparam(%f, server) $iif($jnum(%f, port), $v1, 0) $jparam(%f, password) | return }
+  ; A cid on connect means "reconnect that window" (already selected above).
+  if (%act == connect) { bridge_do_connect %id $jparam(%f, server) $iif($jnum(%f, port), $v1, 0) $iif(%cid != $null, 1, 0) $jparam(%f, password) | return }
   if (%act == raw) { bridge_do_raw %id $jparam(%f, line) | return }
   if (%act == nick) { bridge_do_nick %id $jparam(%f, nick) | return }
   if (%act == disconnect) { bridge_do_disconnect %id $jparam(%f, message) | return }
@@ -509,18 +510,30 @@ alias -l bridge_do_echo {
 
 ; --- connect / raw --------------------------------------------------------
 
-; $1 = id, $2 = server, $3 = port (0 for default), $4- = password
+; $1 = id, $2 = server, $3 = port (0 for default), $4 = 1 to reconnect the
+; current window, $5- = password
 ;
-; Always a NEW connection: /server -m opens another connection window. Plain
-; /server reused the active one, which disconnected whatever the user was on.
+; Normally a NEW connection: /server -m opens another connection window. Plain
+; /server reuses the current window, which disconnected whatever the user was
+; on, so it is used only when the daemon names a window to reuse: a quit window
+; for the same network, the agent's own or the user's (mIRC keeps the window,
+; and opening a new one each time piled them up). The daemon only ever names a
+; disconnected window, and this refuses anything still connected regardless.
 ; The new connection's id is found by comparing the connection list before and
 ; after, which works whichever window /server -m leaves active.
-; VERIFY: the new connection exists as soon as /server -m returns.
 alias -l bridge_do_connect {
   if (!$2) { bridge_fail $1 0 missing-server | return }
-  var %before = $bridge_cids
   var %port = $iif($3, $3, 6667)
-  if ($4- != $null) server -m $2 %port $4-
+  if ($4 == 1) {
+    if ($status != disconnected) { bridge_fail $1 0 connection-busy | return }
+    set -e %bridge_conn_id $1
+    set -e %bridge_conn_cid $cid
+    if ($5- != $null) server $2 %port $5-
+    else server $2 %port
+    return
+  }
+  var %before = $bridge_cids
+  if ($5- != $null) server -m $2 %port $5-
   else server -m $2 %port
   var %new, %i = 1
   while (%i <= $scon(0)) {

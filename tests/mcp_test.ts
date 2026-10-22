@@ -779,6 +779,141 @@ Deno.test("a 477 refusal after a services rename tells the agent what to tell th
   }
 });
 
+// --- reusing the agent's own windows -----------------------------------------
+
+/**
+ * A fake whose connections behave like mIRC windows: connect without a cid
+ * adds one (/server -m), connect with a cid reconnects that window in place,
+ * and disconnect leaves the window there, disconnected.
+ */
+function windowsLikeMirc(s: Stack, start: NetworkState[]): void {
+  let nets = start;
+  let nextCid = 100;
+  s.fake.setNetworks(nets);
+  s.fake.setHandler((cmd, fake) => {
+    const cid = cmd.params?.cid as number | undefined;
+    if (cmd.action === "connect") {
+      if (cid !== undefined) {
+        nets = nets.map((n) => n.cid === cid ? { ...n, status: "connected" } : n);
+      } else {
+        nets = [
+          ...nets,
+          network({
+            cid: nextCid,
+            name: "Rizon",
+            server: "irc.rizon.net",
+            channels: [],
+            members: {},
+          }),
+        ];
+      }
+      fake.setNetworks(nets);
+      return { ok: true, data: { cid: cid ?? nextCid++ } };
+    }
+    if (cmd.action === "disconnect") {
+      nets = nets.map((n) => n.cid === cid ? { ...n, status: "disconnected", channels: [] } : n);
+      fake.setNetworks(nets);
+      return { ok: true };
+    }
+    return undefined;
+  });
+}
+
+Deno.test("the agent reconnects its own quit window instead of opening another", async () => {
+  const s = await stack();
+  try {
+    windowsLikeMirc(s, [network()]);
+    const args = { network: "Rizon", server: "irc.rizon.net" };
+    const first = JSON.parse(
+      textOf(await s.client.callTool({ name: "irc_ensure_connected", arguments: args })),
+    );
+    assertEquals(first.reusedWindow, false);
+    await s.client.callTool({ name: "irc_disconnect", arguments: { network: "Rizon" } });
+
+    const second = JSON.parse(
+      textOf(await s.client.callTool({ name: "irc_ensure_connected", arguments: args })),
+    );
+    assertEquals(second.reusedWindow, "agent's");
+    assertEquals(second.network.cid, first.network.cid);
+
+    const connects = s.fake.received.filter((c) => c.action === "connect");
+    assertEquals(connects.map((c) => c.params?.cid), [undefined, first.network.cid]);
+    // Still just the user's window and the agent's one.
+    const state = JSON.parse(
+      textOf(await s.client.callTool({ name: "irc_get_state", arguments: {} })),
+    );
+    assertEquals(state.networks.length, 2);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("the user's quit window is reconnected, and stays the user's", async () => {
+  const s = await stack();
+  try {
+    // The user quit Rizon themselves: their window, no receipt.
+    windowsLikeMirc(s, [
+      network(),
+      network({
+        cid: 5,
+        name: "Rizon",
+        server: "irc.rizon.net",
+        status: "disconnected",
+        channels: [],
+      }),
+    ]);
+    // Let the daemon see the window, as a refresh or mIRC's events would.
+    await s.mirc.registry.resolve()!.refreshState();
+    const body = JSON.parse(textOf(
+      await s.client.callTool({
+        name: "irc_ensure_connected",
+        arguments: { network: "Rizon", server: "irc.rizon.net" },
+      }),
+    ));
+    assertEquals(body.reusedWindow, "user's");
+    assertEquals(s.fake.received.find((c) => c.action === "connect")?.params?.cid, 5);
+
+    // Back up, but still theirs: no receipt, so disconnecting needs confirmation.
+    const state = JSON.parse(
+      textOf(await s.client.callTool({ name: "irc_get_state", arguments: { network: "Rizon" } })),
+    );
+    assertEquals(state.networks[0].openedByAgent, false);
+    const refused = await s.client.callTool({
+      name: "irc_disconnect",
+      arguments: { network: "Rizon" },
+    });
+    assertEquals(textOf(refused).startsWith("guard_denied:"), true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("the agent's own quit window is preferred over the user's", async () => {
+  const s = await stack();
+  try {
+    // Two quit Rizon windows: the user's (5) listed first, and the agent's (9).
+    windowsLikeMirc(s, [
+      network(),
+      network({ cid: 5, name: "Rizon", status: "disconnected", channels: [] }),
+      network({ cid: 9, name: "Rizon", status: "disconnected", channels: [] }),
+    ]);
+    const session = s.mirc.registry.resolve()!;
+    await session.refreshState();
+    session.owned.openedConnection(9);
+
+    const body = JSON.parse(textOf(
+      await s.client.callTool({
+        name: "irc_ensure_connected",
+        arguments: { network: "Rizon", server: "irc.rizon.net" },
+      }),
+    ));
+    assertEquals(body.reusedWindow, "agent's");
+    assertEquals(body.network.cid, 9);
+  } finally {
+    await s.stop();
+  }
+});
+
 Deno.test("GET and DELETE on /mcp are 405, so no endless event stream is ever opened", async () => {
   const s = await stack();
   try {

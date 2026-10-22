@@ -140,6 +140,11 @@ const ERR_TOKENS: Record<string, { code: ErrorCode; hint: string }> = {
       "server sent a refusal mIRC does not recognise; check irc_read for a raw numeric.",
   },
   "ison-timeout": { code: "timeout", hint: "the server did not answer the ISON query." },
+  "connection-busy": {
+    code: "connect_failed",
+    hint: "mIRC refused to reconnect that window because it is not disconnected. Check " +
+      "irc_get_state; the connection may already be back.",
+  },
   "nick-timeout": {
     code: "timeout",
     hint: "the server never confirmed the nick change. Check irc_get_state for the current nick.",

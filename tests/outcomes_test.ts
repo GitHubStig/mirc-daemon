@@ -161,6 +161,7 @@ Deno.test("the err tokens bridge.mrc sends map to their own codes", () => {
     ["join-timeout", "join_timeout"],
     ["ison-timeout", "timeout"],
     ["part-timeout", "timeout"],
+    ["connection-busy", "connect_failed"],
     ["connection-failed", "connect_failed"],
   ];
   for (const [err, code] of cases) {
