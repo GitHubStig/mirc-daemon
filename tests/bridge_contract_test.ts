@@ -350,8 +350,9 @@ Deno.test("coloured IRC text, escaped as bridge.mrc escapes it, arrives intact",
   }
 });
 
-Deno.test("a frame with raw control characters, as an older bridge.mrc sent, still parses", async () => {
-  // Users copy bridge.mrc into mIRC by hand, so an old copy can outlive the fix.
+Deno.test("a frame with raw control characters still parses, should jstr ever regress", async () => {
+  // Defence in depth: jstr escapes these, but if that ever breaks, the failure
+  // would be every coloured line silently dropped.
   const h = await attach();
   try {
     const session = h.session()!;

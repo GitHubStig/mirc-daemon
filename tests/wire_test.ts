@@ -4,12 +4,12 @@ import {
   escapeControlChars,
   fitsFrame,
   FrameTooLargeError,
-  fromWireCommand,
   LineDecoder,
   parseInbound,
   toWireCommand,
 } from "../src/core/wire.ts";
 import { MAX_FRAME_BYTES } from "../src/core/types.ts";
+import { fromWireCommand } from "./fake_mirc.ts";
 
 const enc = (s: string) => new TextEncoder().encode(s);
 

@@ -79,24 +79,10 @@ export function toWireCommand(cmd: CmdFrame): CmdFrame {
   return { ...cmd, params };
 }
 
-/** The inverse, for test doubles that stand in for bridge.mrc. */
-export function fromWireCommand(cmd: CmdFrame): CmdFrame {
-  if (!cmd.params) return cmd;
-  const params: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(cmd.params)) {
-    params[key] = typeof value === "string" ? fromBase64(value) : value;
-  }
-  return { ...cmd, params };
-}
-
 function toBase64(text: string): string {
   let binary = "";
   for (const byte of encoder.encode(text)) binary += String.fromCharCode(byte);
   return btoa(binary);
-}
-
-function fromBase64(b64: string): string {
-  return decoder.decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)));
 }
 
 /** True when the frame fits within the line limit. */
@@ -189,6 +175,11 @@ export class LineDecoder {
  * forgets to escape them makes every coloured line unparseable — which is how
  * XDCC bot replies went missing. They are never legal outside a string either,
  * so escaping them everywhere cannot change a valid frame's meaning.
+ *
+ * bridge.mrc's jstr escapes them itself, so this is defence in depth, not
+ * compatibility (a pre-v2 script is refused at hello, before it can send an
+ * event). It stays because a regression in jstr would fail the worst possible
+ * way: every coloured line dropped, with nothing to say why.
  */
 export function escapeControlChars(line: string): string {
   return line.replace(

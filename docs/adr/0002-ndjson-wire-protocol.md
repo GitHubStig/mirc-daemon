@@ -29,8 +29,9 @@ The two directions handle strings differently, because only one side has a JSON 
 **mIRC → daemon:** mSL builds JSON by hand and the daemon parses it with `JSON.parse`. `bridge.mrc`
 escapes every C0 control character, not just newline, CR and tab, because IRC formatting (bold,
 colour, underline, reset) is made of control characters and `JSON.parse` rejects them raw. The
-daemon also escapes any stray control character before parsing, since a user's copy of `bridge.mrc`
-can be older than the daemon.
+daemon also escapes any stray control character before parsing. That is defence in depth rather than
+compatibility, since a pre-v2 script is refused at `hello` before it can send an event: it guards
+against a future regression in `jstr`, which would otherwise drop every coloured line silently.
 
 **Daemon → mIRC (protocol v2):** every string inside `params` is base64 (UTF-8 bytes); numbers are
 left as they are. mSL has no JSON parser. Reading and unescaping full JSON strings with mSL regexes

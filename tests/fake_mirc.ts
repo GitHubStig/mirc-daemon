@@ -7,9 +7,25 @@
  * end-to-end without an IRC network.
  */
 
-import { encodeFrame, fromWireCommand, LineDecoder, parseInbound } from "../src/core/wire.ts";
+import { encodeFrame, LineDecoder, parseInbound } from "../src/core/wire.ts";
 import type { CmdFrame, EventKind, NetworkState, WelcomeFrame } from "../src/core/types.ts";
 import { PROTOCOL_VERSION } from "../src/core/types.ts";
+
+/**
+ * Undo the daemon's param encoding, as bridge.mrc's jparam does. It lives here
+ * rather than in src/ because the daemon itself never decodes a command; the
+ * real decoder is mSL.
+ */
+export function fromWireCommand(cmd: CmdFrame): CmdFrame {
+  if (!cmd.params) return cmd;
+  const params: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(cmd.params)) {
+    params[key] = typeof value === "string"
+      ? new TextDecoder().decode(Uint8Array.from(atob(value), (c) => c.charCodeAt(0)))
+      : value;
+  }
+  return { ...cmd, params };
+}
 
 export interface CommandReply {
   ok: boolean;
