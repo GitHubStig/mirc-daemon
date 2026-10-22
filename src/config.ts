@@ -37,6 +37,8 @@ export interface Config {
   bufferCapacity: number;
   /** How long to wait for a connecting socket to identify itself. */
   helloTimeoutMs: number;
+  /** ADR-0006: raw IRC lines are denied unless this is explicitly enabled. */
+  allowRaw: boolean;
 }
 
 export class ConfigError extends Error {
@@ -181,5 +183,6 @@ export function loadConfig(
     stateFreshnessMs: parseInteger(pick("state-freshness"), 5000, "--state-freshness", 0),
     bufferCapacity: parseInteger(pick("buffer-capacity"), 2000, "--buffer-capacity", 1),
     helloTimeoutMs: parseInteger(pick("hello-timeout"), 5000, "--hello-timeout", 100),
+    allowRaw: flags.has("allow-raw") || env.MIRC_DAEMON_ALLOW_RAW === "1",
   };
 }

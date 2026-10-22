@@ -21,6 +21,8 @@ export interface HttpServerOptions {
   registry: SessionRegistry;
   log: LogSink;
   startedTs: number;
+  /** Mounted at /mcp once the MCP surface is started. */
+  mcp?: { handle(request: Request): Promise<Response> };
 }
 
 export interface RunningHttpServer {
@@ -76,7 +78,7 @@ export function startHttpServer(options: HttpServerOptions): RunningHttpServer {
     hostname: options.hostname,
     port: options.port,
     onListen: () => {},
-  }, (request) => {
+  }, async (request) => {
     const url = new URL(request.url);
 
     // Liveness is deliberately unauthenticated so a supervisor can probe it.
@@ -94,6 +96,11 @@ export function startHttpServer(options: HttpServerOptions): RunningHttpServer {
         reason: presented === undefined ? "missing authorization header" : "invalid token",
       });
       return json({ error: "unauthorized" }, 401);
+    }
+
+    if (url.pathname === "/mcp") {
+      if (!options.mcp) return json({ error: "MCP is not mounted" }, 503);
+      return await options.mcp.handle(request);
     }
 
     if (url.pathname === "/status") return json(describe());

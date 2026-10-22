@@ -10,7 +10,12 @@
     "lint": "deno lint"
   },
   "imports": {
-    "@std/assert": "jsr:@std/assert@^1.0.0"
+    "@std/assert": "jsr:@std/assert@^1.0.0",
+    "@modelcontextprotocol/sdk/server/mcp.js": "npm:@modelcontextprotocol/sdk@^1.32.1/server/mcp.js",
+    "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js": "npm:@modelcontextprotocol/sdk@^1.32.1/server/webStandardStreamableHttp.js",
+    "@modelcontextprotocol/sdk/client/index.js": "npm:@modelcontextprotocol/sdk@^1.32.1/client/index.js",
+    "@modelcontextprotocol/sdk/client/streamableHttp.js": "npm:@modelcontextprotocol/sdk@^1.32.1/client/streamableHttp.js",
+    "zod": "npm:zod@^4.6.7"
   },
   "fmt": {
     "lineWidth": 100,

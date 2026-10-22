@@ -30,7 +30,7 @@ speaks. Verify the choice empirically with `pi mcp list` rather than trusting do
 
 ## The SDK's cost, and the exit path
 
-The v1 SDK resolves to 91 unique packages in `deno.lock`, including `express`, `express-rate-limit`
+The v1 SDK resolves to 90 unique packages in `deno.lock`, including `express`, `express-rate-limit`
 and `hono`. Those exist for the SDK's own HTTP server helpers; we take only the protocol layer and
 hand its requests to `Deno.serve`, so they are dead weight on a local daemon's supply-chain surface.
 
@@ -42,6 +42,10 @@ The trade improves as the revision moves. `2026-07-28` removes the handshake and
 precisely the machinery the SDK is currently carrying. A stateless `tools/list` and `tools/call`
 over JSON-RPC is a few hundred lines of request handler, so the cost of replacing the SDK falls at
 the same moment its value does.
+
+One dependency is worth pinning deliberately. The SDK's peer range for `zod` is `^3.25 || ^4.0`, and
+choosing v3 leaves the SDK's own internals to resolve v4 independently — two majors in the lock,
+from one range. We pin the root `zod` import to v4 so there is exactly one.
 
 **Revisit when the client adopts `2026-07-28`**, and rewrite this ADR rather than adding a second
 one. Until then the SDK stays, and the extra packages are accepted debt.

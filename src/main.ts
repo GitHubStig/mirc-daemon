@@ -9,6 +9,7 @@
 import { ConfigError, loadConfig } from "./config.ts";
 import { createLogger } from "./core/log.ts";
 import { startHttpServer } from "./http/server.ts";
+import { startMcp } from "./mcp/server.ts";
 import { startMircListener } from "./mirc/listener.ts";
 
 const startedTs = Date.now();
@@ -48,6 +49,14 @@ export function main(): void {
     helloTimeoutMs: config.helloTimeoutMs,
   });
 
+  const mcp = startMcp({
+    registry: mirc.registry,
+    log: log.child({ door: "mcp" }),
+    startedTs,
+    stateFreshnessMs: config.stateFreshnessMs,
+    allowRaw: config.allowRaw,
+  });
+
   const http = startHttpServer({
     hostname: config.httpAddr.hostname,
     port: config.httpAddr.port,
@@ -55,6 +64,7 @@ export function main(): void {
     registry: mirc.registry,
     log: log.child({ door: "http" }),
     startedTs,
+    mcp,
   });
 
   log.info("daemon.start", {
@@ -64,8 +74,8 @@ export function main(): void {
     stateFreshnessMs: config.stateFreshnessMs,
     bufferCapacity: config.bufferCapacity,
     logDir: config.logDir,
-    // Honest about what is not built yet, so a missing /mcp is not a mystery.
-    mcpMounted: false,
+    allowRaw: config.allowRaw,
+    mcpMounted: true,
   });
 
   let shuttingDown = false;
@@ -73,7 +83,7 @@ export function main(): void {
     if (shuttingDown) return;
     shuttingDown = true;
     log.info("daemon.stop", { reason });
-    await Promise.allSettled([mirc.close(), http.close()]);
+    await Promise.allSettled([mirc.close(), http.close(), mcp.close()]);
     await log.close();
   };
 
