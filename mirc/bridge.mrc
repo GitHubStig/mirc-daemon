@@ -125,7 +125,8 @@ alias -l jval {
 ; Decoded through a binary variable so the bytes are read back as UTF-8 text
 ; rather than one character per byte. The daemon has already turned line
 ; breaks into spaces, so the result is always safe to hand to /msg.
-; VERIFY: $bvar().text decodes UTF-8 -- /bridge.diag's b64-test checks it.
+; Verified live (mIRC 7.85, 2026-10-22): $bvar().text decodes UTF-8; /bridge.diag's
+; b64-test checks it on every run.
 alias -l jparam {
   var %b64 = $jval($1, $2)
   if (%b64 == $null) return
@@ -340,9 +341,9 @@ alias -l bridge_command {
 ; list, then the channels of each connected one, and assembles the picture. No
 ; single frame has to describe everything mIRC is in, and mSL stays a lookup.
 ;
-; VERIFY: $scon(N) returns the Nth connection's id, /scid N switches to it, and
-; $sreq reports the DCC send-request setting. /bridge.diag prints conns, which
-; exercises all three.
+; Verified live (mIRC 7.85, 2026-10-22): $scon(N) returns the Nth connection's id
+; (window numbers like 607, not 1, 2, 3), /scid N switches to it, and $sreq
+; reports the DCC send-request setting. /bridge.diag prints conns.
 
 ; Every connection id, space-separated.
 alias -l bridge_cids {
@@ -755,7 +756,13 @@ on *:NOTICE:*:*: {
   bridge_send $evp(notice) $+ $chr(44) $+ $kvo(buf, $jstr($bridge_buf)) $+ $chr(44) $+ $kvo(nick, $jstr($nick)) $+ $chr(44) $+ $kvo(user, $jstr($address)) $+ $chr(44) $+ $kvo(text, $jstr($1-)) $+ $chr(125)
 }
 
-on *:CTCP:*:*: {
+; CTCP events are written with the ctcp keyword, like raw: ctcp <level>:<match>:
+; <*|#|?>. This was "on *:CTCP:*:*:", which mIRC never fires; in 1,333 mirrored
+; frames not one CTCP arrived, the DCC SEND offer included. No halt, so mIRC
+; still answers VERSION and PING, and still handles DCC itself.
+; Verified live (2026-10-22): a DCC SEND offer reaches this handler, with "DCC"
+; as $1 and "SEND <file> <ip> <port> <size>" as $2-.
+ctcp *:*:*: {
   if (!$sock(bridge)) return
   bridge_send $evp(ctcp) $+ $chr(44) $+ $kvo(nick, $jstr($nick)) $+ $chr(44) $+ $kvo(extra, $chr(123) $+ $kvo(ctcp, $jstr($1)) $+ $chr(44) $+ $kvo(text, $jstr($2-)) $+ $chr(125)) $+ $chr(125)
 }
@@ -808,15 +815,19 @@ on *:TOPIC:#: {
 ; --- DCC outcomes only ----------------------------------------------------
 ; Progress is deliberately not reported: mIRC already shows it, and the daemon
 ; only needs to know whether a transfer finished or stopped.
-; VERIFY: which identifiers are populated here is a recon question. $filename
-; and $nick are the documented ones, so those are what we send.
+; Verified live (2026-10-22): $filename is the FULL saved path, $nick the sender,
+; and $cid the connection the transfer came in on. mIRC gives no failure reason.
+;
+; Both events take a filename match field (on <level>:GETFAIL:<file>:). They
+; were written without it, as "on *:GETFAIL:", which mIRC never fires: a get
+; that failed live ("connection failed") produced nothing at all.
 
-on *:FILERCVD: {
+on *:FILERCVD:*: {
   if (!$sock(bridge)) return
   bridge_send $evp(dcc) $+ $chr(44) $+ $kvo(extra, $chr(123) $+ $kvo(event, $jstr(complete)) $+ $chr(44) $+ $kvo(file, $jstr($filename)) $+ $chr(44) $+ $kvo(from, $jstr($nick)) $+ $chr(125)) $+ $chr(125)
 }
 
-on *:GETFAIL: {
+on *:GETFAIL:*: {
   if (!$sock(bridge)) return
   bridge_send $evp(dcc) $+ $chr(44) $+ $kvo(extra, $chr(123) $+ $kvo(event, $jstr(getfail)) $+ $chr(44) $+ $kvo(file, $jstr($filename)) $+ $chr(44) $+ $kvo(from, $jstr($nick)) $+ $chr(125)) $+ $chr(125)
 }
