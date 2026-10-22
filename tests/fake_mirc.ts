@@ -54,6 +54,8 @@ export interface FakeMircOptions {
 }
 
 export interface EventFields {
+  /** Defaults to the id of the network named by `net`. */
+  cid?: number;
   net?: string;
   buf?: string;
   nick?: string;
@@ -108,10 +110,14 @@ export class FakeMirc {
 
   /** Emit an IRC event, defaulting the network to the first configured one. */
   emit(kind: EventKind, fields: EventFields = {}): void {
+    const net = fields.net ?? this.#net;
+    // Tag with the matching connection's id, as bridge.mrc's evp does.
+    const cid = fields.cid ?? this.#networks.find((n) => n.name === net)?.cid ?? 1;
     this.send({
       t: "ev",
       kind,
-      net: fields.net ?? this.#net,
+      cid,
+      net,
       buf: fields.buf,
       nick: fields.nick,
       user: fields.user,
@@ -176,8 +182,27 @@ export class FakeMirc {
   }
 
   #defaultReply(cmd: CmdFrame): CommandReply {
-    if (cmd.action === "state") {
-      return { ok: true, data: { networks: this.#networks } };
+    // State in the two halves bridge.mrc gives it: the connection list, then
+    // each connection's channels on request.
+    if (cmd.action === "conns") {
+      return {
+        ok: true,
+        data: {
+          conns: this.#networks.map((n) => ({
+            cid: n.cid,
+            net: n.name,
+            server: n.server ?? "",
+            status: n.status,
+            nick: n.nick,
+          })),
+          sreq: "auto",
+        },
+      };
+    }
+    if (cmd.action === "chans") {
+      const net = this.#networks.find((n) => n.cid === cmd.params?.cid);
+      if (!net) return { ok: false, numeric: 0, err: "no-such-connection" };
+      return { ok: true, data: { channels: net.channels, members: net.members } };
     }
     return { ok: true };
   }

@@ -18,7 +18,7 @@ Proven by running it, with evidence in the log:
   daemon's state model then holds the network, the joined channel and member counts.
 - **Daemon runs**: `deno task start` binds `127.0.0.1:8686` (mIRC, raw TCP) and `127.0.0.1:8687`
   (agents, HTTP). `/health` is unauthenticated, `/status` and `/mcp` require the bearer token.
-- **173 automated tests** (`deno task test`): MBP framing including CRLF and oversize rejection,
+- **182 automated tests** (`deno task test`): MBP framing including CRLF and oversize rejection,
   logging with redaction, the state model, the event log and waits, credit-limited command dispatch,
   the failure taxonomy, DCC outcome tracking, the listener, config, the INI reader, the HTTP door,
   the 20-tool MCP surface driven by the SDK's own client, and the frame shapes `bridge.mrc` emits
@@ -63,8 +63,9 @@ Proven by running it, with evidence in the log:
     329 were all seen.
 - **Connecting while connected** (2026-10-22): `irc_connect` to `irc.efnet.org:6667` while on EFNet.
   - The old connection's `disconnected` arrived first, then `connected`.
-  - The call returned `ok` once the new connection was up, with no spurious `connect_failed`: the
-    `%bridge_conn_skipdc` skip works.
+  - The call returned `ok` once the new connection was up, with no spurious `connect_failed`. (That
+    was the v2 `/server` behaviour, which replaced the user's connection. Since protocol v3,
+    connecting opens an additional connection instead; see ADR-0012.)
   - mIRC rejoined its channels by itself.
   - It took **32.6 s**, which is normal for EFNet (ident and DNS lookups before registration). The
     tool allows 60 s. A slow server could get close; raise the limit if `connect_timeout` ever shows
@@ -74,7 +75,24 @@ Proven by running it, with evidence in the log:
 
 ## Not verified
 
-Assumed or untested. Treat these as the actual risk surface. The one remaining live check:
+Assumed or untested. Treat these as the actual risk surface.
+
+**Protocol v3 (multi-connection, ADR-0012) has never run in mIRC.** Load the new `bridge.mrc` (the
+daemon refuses v2), then, in order:
+
+1. `/bridge.diag` writes to the `@bridge` window and brings it forward. `conns =` lists your EFNet
+   connection with a numeric `cid`, the right network, `"status":"connected"`, and a `sreq` of
+   `auto`. This proves `$scon(N)`, `/scid` and `$sreq`. `b64-test ok` still passes.
+2. `irc_get_state` lists EFNet with its `cid` and `#home!`.
+3. `irc_ensure_connected {network: "Rizon", server: "irc.rizon.net"}` opens a **second** connection
+   window. EFNet stays connected and in `#home!`, and the call returns the new `cid` once Rizon has
+   registered. This proves `/server -m` and finding the new `cid`.
+4. `irc_ensure_joined` on a Rizon channel, then `irc_send` with `network: "Rizon"`: the message goes
+   out on Rizon, not EFNet. With both connected, an `irc_send` naming no network is refused as
+   `ambiguous_network`.
+5. `irc_ensure_connected` for EFNet returns `skipped: true` with your existing connection.
+
+Then, carried over:
 
 1. `irc_join` on a channel that refuses you fails with a code within 8s, **and** the refusal also
    appears as a raw event. This needs a `+i` or `+k` channel held by someone else: they
@@ -86,8 +104,6 @@ Beyond those:
 - **DCC recon is outstanding**: which identifiers `FILERCVD`/`GETFAIL` actually populate, and — the
   decisive one — whether `GETFAIL` fires when a transfer stalls _without_ the connection breaking.
   If it does not, the liveness-only stall check described in ADR-0010 is needed.
-- **Multi-network**: `state` reports the **active connection only**. Enumerating every connection
-  needs `/scon -r` per connection.
 - **`raw` gating** is implemented as default-deny but only exercised as "denied".
 
 ## Traps that all failed silently
@@ -168,13 +184,15 @@ In mIRC: `/load -rs bridge.mrc` then `/bridge.start`. Available while debugging:
 
 ## Next, in order
 
-1. **Finish the live checklist** under "Not verified". The agent path itself is proven; what is left
-   needs another person or a visible action in a channel.
-2. **XDCC end-to-end.** `xdcc_list`, then `xdcc_fetch` against a real bot; confirm the request, the
-   bot's reply, and a DCC offer.
-3. **Recon** the DCC questions above and delete the guesswork from ADR-0010.
-4. **Cleanup**: multi-network state via `/scon -r` (open question: make the `network` argument work,
-   or remove it); decide whether `--allow-raw` is needed; consider a daemon-side heartbeat so a dead
+1. **Verify protocol v3 live**, using the checklist under "Not verified".
+2. **Multi-connection phase 2: ownership** (ADR-0012). An in-memory record of what the agent opened
+   and joined. `irc_part` and a new `irc_disconnect` work freely on those and need `confirm: true`
+   on the user's.
+3. **Multi-connection phase 3: XDCC start**: recognise the bot's `DCC SEND` offer, and report
+   `$sreq` honestly (auto, ask or ignore).
+4. **XDCC end-to-end** against a real bot on another network, with EFNet left untouched.
+5. **Recon** the DCC questions above and delete the guesswork from ADR-0010.
+6. **Cleanup**: decide whether `--allow-raw` is needed; consider a daemon-side heartbeat so a dead
    link is noticed without waiting on TCP.
 
 ## Shape of the thing

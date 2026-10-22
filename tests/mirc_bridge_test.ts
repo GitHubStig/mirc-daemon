@@ -9,6 +9,7 @@ const TOKEN = "test-token";
 
 function network(overrides: Partial<NetworkState> = {}): NetworkState {
   return {
+    cid: 1,
     name: "net1",
     server: "irc.example.net",
     port: 6667,
@@ -67,7 +68,8 @@ Deno.test("an attaching mIRC is welcomed, and its state is seeded before any age
     assertEquals(session.state.resolve().server, "irc.example.net");
     assertEquals(session.state.isStale(5000), false);
 
-    assertCommandSeen(fake, "state");
+    assertCommandSeen(fake, "conns");
+    assertCommandSeen(fake, "chans");
     await fake.close();
   } finally {
     await h.stop();
@@ -312,7 +314,7 @@ Deno.test("both directions of one socket are logged with its remote address", as
     const h = daemon({ log: log.child({ door: "mirc" }) });
     try {
       const fake = await h.connect();
-      await until(() => fake.received.some((c) => c.action === "state"), { label: "state" });
+      await until(() => fake.received.some((c) => c.action === "conns"), { label: "conns" });
       await fake.close();
     } finally {
       await h.stop();

@@ -33,12 +33,12 @@ daemon also escapes any stray control character before parsing. That is defence 
 compatibility, since a pre-v2 script is refused at `hello` before it can send an event: it guards
 against a future regression in `jstr`, which would otherwise drop every coloured line silently.
 
-**Daemon → mIRC (protocol v2):** every string inside `params` is base64 (UTF-8 bytes); numbers are
-left as they are. mSL has no JSON parser. Reading and unescaping full JSON strings with mSL regexes
-was where the bridge's quoting bugs lived: `say "hi"` reached IRC as `say \`. Base64 has no quote or
-backslash, so mIRC lifts a value with a plain `"key":"([^"]*)"` and decodes it with the builtin
-`$decode`, through a binary variable so the bytes are read back as UTF-8. The envelope (`t`, `id`,
-`action`) and the `bye` reason stay plain ASCII the daemon writes itself, so wire traces stay
+**Daemon → mIRC (since protocol v2):** every string inside `params` is base64 (UTF-8 bytes); numbers
+are left as they are. mSL has no JSON parser. Reading and unescaping full JSON strings with mSL
+regexes was where the bridge's quoting bugs lived: `say "hi"` reached IRC as `say \`. Base64 has no
+quote or backslash, so mIRC lifts a value with a plain `"key":"([^"]*)"` and decodes it with the
+builtin `$decode`, through a binary variable so the bytes are read back as UTF-8. The envelope (`t`,
+`id`, `action`) and the `bye` reason stay plain ASCII the daemon writes itself, so wire traces stay
 readable. The daemon log records commands decoded, which is also what keeps a base64 password inside
 the redactor's reach. Line breaks in params become spaces before encoding, so agent text can never
 start a second IRC command. A `params` value that would push the frame past the limit is refused as

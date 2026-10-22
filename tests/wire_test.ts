@@ -146,6 +146,6 @@ Deno.test("toWireCommand round-trips UTF-8 and IRC formatting codes", () => {
 });
 
 Deno.test("a command without params is sent unchanged", () => {
-  const cmd = { t: "cmd" as const, id: "c1", action: "state" as const };
+  const cmd = { t: "cmd" as const, id: "c1", action: "conns" as const };
   assertEquals(toWireCommand(cmd), cmd);
 });

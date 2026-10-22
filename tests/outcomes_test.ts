@@ -134,6 +134,7 @@ Deno.test("the threshold is adjustable for quieter networks", () => {
 
 Deno.test("networkUsable reflects whether commands can actually be sent", () => {
   const base: NetworkState = {
+    cid: 1,
     name: "n",
     status: "connected",
     nick: "me",

@@ -118,27 +118,25 @@ async function attach(): Promise<Harness> {
   });
 
   const mirc = await RawMirc.connect(listener.addr.hostname, listener.addr.port);
-  mirc.send({ t: "hello", v: 2, token: TOKEN, nick: "me", mirc: "7.75" });
+  mirc.send({ t: "hello", v: 3, token: TOKEN, nick: "me", mirc: "7.75" });
 
   const welcome = await mirc.next();
   assertEquals(welcome?.t, "welcome");
 
-  const stateCmd = await mirc.nextCommand("state");
-  // The exact shape bridge.do.state builds, wrapped in `data` as the daemon reads it.
+  // The shapes bridge_connspayload and bridge_do_chans build, wrapped in `data`
+  // as the daemon reads them.
+  const connsCmd = await mirc.nextCommand("conns");
   mirc.send({
     t: "res",
-    id: stateCmd.id,
+    id: connsCmd.id,
     ok: true,
     data: {
-      networks: [{
-        name: "net1",
-        status: "connected",
-        nick: "me",
-        channels: [],
-        members: {},
-      }],
+      conns: [{ cid: 1, net: "net1", server: "irc.example.net", status: "connected", nick: "me" }],
+      sreq: "auto",
     },
   });
+  const chansCmd = await mirc.nextCommand("chans");
+  mirc.send({ t: "res", id: chansCmd.id, ok: true, data: { channels: [], members: {} } });
 
   const session = listener.registry.get("s1")!;
   await until(() => session.state.networks().length === 1, { label: "state seeded" });
@@ -154,34 +152,69 @@ async function attach(): Promise<Harness> {
   };
 }
 
-Deno.test("the state reply shape bridge.mrc emits is understood", async () => {
+Deno.test("the conns and chans replies bridge.mrc emits are understood", async () => {
   const h = await attach();
   try {
     const session = h.session()!;
     const refreshed = session.refreshState();
-    const cmd = await h.mirc.nextCommand("state");
+
+    // Two connections: one up, one still registering. A registering connection
+    // has no network name yet ($network is empty), and $status says "loggingon".
+    const conns = await h.mirc.nextCommand("conns");
     h.mirc.send({
       t: "res",
-      id: cmd.id,
+      id: conns.id,
       ok: true,
       data: {
-        networks: [{
-          name: "net1",
-          status: "connected",
-          nick: "me",
-          channels: ["#chan", "#other"],
-          members: { "#chan": 3, "#other": 1 },
-        }],
+        conns: [
+          { cid: 1, net: "EFnet", server: "irc.efnet.org", status: "connected", nick: "me" },
+          { cid: 3, net: "", server: "irc.rizon.net", status: "loggingon", nick: "me" },
+        ],
+        sreq: "ask",
       },
+    });
+
+    // Channels are asked for the connected one only, by its cid, unencoded.
+    const chans = await h.mirc.nextCommand("chans");
+    assertEquals((chans.params as Record<string, unknown>).cid, 1);
+    h.mirc.send({
+      t: "res",
+      id: chans.id,
+      ok: true,
+      data: { channels: ["#chan", "#other"], members: { "#chan": 3, "#other": 1 } },
     });
     assertEquals(await refreshed, undefined);
 
-    const net = session.state.resolve();
-    assertEquals(net.name, "net1");
-    assertEquals(net.status, "connected");
-    assertEquals(net.nick, "me");
-    assertEquals(session.state.isJoined(net, "#chan"), true);
-    assertEquals(session.state.memberCount(net, "#chan"), 3);
+    const efnet = session.state.resolve("efnet");
+    assertEquals(efnet.cid, 1);
+    assertEquals(efnet.status, "connected");
+    assertEquals(session.state.isJoined(efnet, "#chan"), true);
+    assertEquals(session.state.memberCount(efnet, "#chan"), 3);
+
+    const rizon = session.state.byCid(3)!;
+    assertEquals(rizon.name, "irc.rizon.net");
+    assertEquals(rizon.status, "connecting");
+    assertEquals(rizon.channels, []);
+
+    // With only one connected, a call naming no network is not ambiguous.
+    assertEquals(session.state.resolve().cid, 1);
+    assertEquals(session.sreq, "ask");
+  } finally {
+    await h.stop();
+  }
+});
+
+Deno.test("a command for a connection carries its cid on the wire, unencoded", async () => {
+  const h = await attach();
+  try {
+    const sent = h.session()!.commands.send("msg", { cid: 1, target: "#chan", text: "hi" });
+    const cmd = await h.mirc.nextCommand("msg");
+    const params = cmd.params as Record<string, unknown>;
+    // jnum reads it as a bare number; only strings are base64.
+    assertEquals(params.cid, 1);
+    assertEquals(/"cid":1[,}]/.test(JSON.stringify(cmd)), true);
+    h.mirc.send({ t: "res", id: cmd.id, ok: true });
+    assertEquals((await sent).ok, true);
   } finally {
     await h.stop();
   }

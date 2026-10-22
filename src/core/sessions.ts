@@ -16,10 +16,19 @@ import {
   type BridgeError,
   bridgeError,
   type BridgeEvent,
+  type ChansPayload,
   type CmdFrame,
+  type ConnsPayload,
+  type NetworkState,
+  type NetworkStatus,
   type SessionInfo,
-  type StatePayload,
 } from "./types.ts";
+
+/** mIRC's $status has a fourth value, "loggingon", which is still connecting. */
+function toStatus(status: string): NetworkStatus {
+  if (status === "connected" || status === "disconnected") return status;
+  return "connecting";
+}
 import type { LogSink } from "./log.ts";
 
 export interface SessionOptions {
@@ -43,6 +52,8 @@ export class Session {
   readonly commands: CommandDispatcher;
   nick: string;
   mirc?: string;
+  /** mIRC's DCC send-request setting ($sreq) as of the last refresh, if reported. */
+  sreq?: string;
 
   constructor(options: SessionOptions) {
     this.id = options.id;
@@ -86,14 +97,41 @@ export class Session {
    * model has gone stale — so nothing acts on a picture of mIRC that has drifted.
    */
   async refreshState(timeoutMs?: number): Promise<BridgeError | undefined> {
-    const outcome = await this.commands.send("state", undefined, { timeoutMs });
+    const outcome = await this.commands.send("conns", undefined, { timeoutMs });
     if (!outcome.ok) return outcome.error;
 
-    const payload = outcome.data as StatePayload | undefined;
-    if (!payload || !Array.isArray(payload.networks)) {
-      return bridgeError("server_error", "mIRC replied to `state` without any networks.");
+    const payload = outcome.data as ConnsPayload | undefined;
+    if (!payload || !Array.isArray(payload.conns)) {
+      return bridgeError("server_error", "mIRC replied to `conns` without a connection list.");
     }
-    this.state.applyStateFrame(payload.networks);
+    if (typeof payload.sreq === "string") this.sreq = payload.sreq;
+
+    // Channels are fetched per connection rather than all at once, so that no
+    // single frame has to describe everything mIRC is in. Only a connected
+    // connection can be in a channel, so the rest cost no round trip.
+    const networks: NetworkState[] = [];
+    for (const conn of payload.conns) {
+      if (typeof conn.cid !== "number") continue;
+      const status = toStatus(conn.status);
+      const net: NetworkState = {
+        cid: conn.cid,
+        name: conn.net || conn.server || `cid ${conn.cid}`,
+        server: conn.server || undefined,
+        status,
+        nick: conn.nick,
+        channels: [],
+        members: {},
+      };
+      if (status === "connected") {
+        const chans = await this.commands.send("chans", { cid: conn.cid }, { timeoutMs });
+        if (!chans.ok) return chans.error;
+        const data = chans.data as Partial<ChansPayload> | undefined;
+        net.channels = Array.isArray(data?.channels) ? data.channels : [];
+        net.members = data?.members ?? {};
+      }
+      networks.push(net);
+    }
+    this.state.applyStateFrame(networks);
     return undefined;
   }
 

@@ -199,6 +199,7 @@ export async function handleMircConnection(
     }
     session.record({
       kind: frame.kind,
+      cid: typeof frame.cid === "number" ? frame.cid : undefined,
       net: frame.net,
       buf: frame.buf,
       nick: frame.nick,

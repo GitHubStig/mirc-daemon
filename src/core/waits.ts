@@ -21,6 +21,12 @@ import type { EventLog } from "./buffers.ts";
 
 export interface WaitMatcher {
   kind?: EventKind;
+  /**
+   * The connection the event must come from. Stricter than `net`: a nick is
+   * only unique within one connection, so a reply from "Bot" on another
+   * network must not satisfy a wait on this one.
+   */
+  cid?: number;
   net?: string;
   /** IRC window: channel or query nick. Matched case-insensitively. */
   buf?: string;
@@ -45,6 +51,7 @@ export function isChannelBuffer(buf: string | undefined): boolean {
 
 export function matchesWait(event: BridgeEvent, matcher: WaitMatcher): boolean {
   if (matcher.kind !== undefined && event.kind !== matcher.kind) return false;
+  if (matcher.cid !== undefined && event.cid !== matcher.cid) return false;
   if (matcher.direct && isChannelBuffer(event.buf)) return false;
   if (matcher.net !== undefined && !sameNetwork(event.net, matcher.net)) return false;
   if (matcher.buf !== undefined && !sameIgnoreCase(event.buf, matcher.buf)) return false;

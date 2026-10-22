@@ -4,6 +4,7 @@ import { BridgeFailure, type NetworkState } from "../src/core/types.ts";
 
 function network(overrides: Partial<NetworkState> = {}): NetworkState {
   return {
+    cid: 1,
     name: "net1",
     server: "irc.example.net",
     port: 6667,
@@ -24,7 +25,7 @@ Deno.test("resolve infers the network when exactly one is connected", () => {
 
 Deno.test("resolve refuses to guess when several networks are connected", () => {
   const state = new StateModel();
-  state.applyStateFrame([network(), network({ name: "net2" })]);
+  state.applyStateFrame([network(), network({ cid: 2, name: "net2" })]);
   const err = assertThrows(() => state.resolve(), BridgeFailure) as BridgeFailure;
   assertEquals(err.error.code, "ambiguous_network");
   // Naming one is always fine.
@@ -33,7 +34,7 @@ Deno.test("resolve refuses to guess when several networks are connected", () => 
 
 Deno.test("resolve reports an unknown network with the list of real ones", () => {
   const state = new StateModel();
-  state.applyStateFrame([network(), network({ name: "net2" })]);
+  state.applyStateFrame([network(), network({ cid: 2, name: "net2" })]);
   const err = assertThrows(() => state.resolve("nope"), BridgeFailure) as BridgeFailure;
   assertEquals(err.error.code, "unknown_network");
   assertEquals(err.error.hint.includes("net1"), true);
@@ -113,9 +114,9 @@ Deno.test("disconnect clears channels so we never command a dead network", () =>
     net: "net1",
     extra: { event: "disconnected" },
   });
-  assertEquals(state.resolve().status, "disconnected");
-  assertEquals(state.resolve().channels, []);
-  assertEquals(state.resolve().members, {});
+  assertEquals(state.resolve("net1").status, "disconnected");
+  assertEquals(state.resolve("net1").channels, []);
+  assertEquals(state.resolve("net1").members, {});
 });
 
 Deno.test("events for an unknown network are ignored rather than inventing one", () => {
@@ -149,4 +150,57 @@ Deno.test("network names match regardless of the spelling a server announces", (
   // Events tagged with the other spelling still update the same network.
   model.applyEvent({ seq: 1, ts: 0, kind: "join", net: "EFnet", buf: "#chan", nick: net.nick });
   assertEquals(model.isJoined(model.resolve("EFNET"), "#chan"), true);
+});
+
+Deno.test("two connections to one network: the connected one wins, two connected is ambiguous", () => {
+  const state = new StateModel();
+  state.applyStateFrame([
+    network({ cid: 1, name: "EFnet", status: "disconnected", channels: [] }),
+    network({ cid: 4, name: "EFNet" }),
+  ]);
+  // A leftover disconnected window does not make the name ambiguous.
+  assertEquals(state.resolve("efnet").cid, 4);
+  assertEquals(state.find("EFNET")?.cid, 4);
+
+  state.applyStateFrame([network({ cid: 1, name: "EFnet" }), network({ cid: 4, name: "EFNet" })]);
+  const err = assertThrows(() => state.resolve("EFnet"), BridgeFailure) as BridgeFailure;
+  assertEquals(err.error.code, "ambiguous_network");
+  // The hint names both connections so a person can tell them apart.
+  assertEquals(err.error.hint.includes("cid 1") && err.error.hint.includes("cid 4"), true);
+});
+
+Deno.test("events are applied to the connection their cid names, not by network name", () => {
+  const state = new StateModel();
+  state.applyStateFrame([
+    network({ cid: 1, name: "EFnet", nick: "me", channels: [] }),
+    network({ cid: 4, name: "EFnet", nick: "me", channels: [] }),
+  ]);
+  state.applyEvent({ seq: 1, ts: 0, kind: "join", cid: 4, net: "EFnet", buf: "#x", nick: "me" });
+  assertEquals(state.byCid(4)?.channels, ["#x"]);
+  assertEquals(state.byCid(1)?.channels, []);
+});
+
+Deno.test("a connection learns its network name when it finishes connecting", () => {
+  // Until registration completes, mIRC only knows the server it dialled.
+  const state = new StateModel();
+  state.applyStateFrame([
+    network({ cid: 3, name: "irc.rizon.net", status: "connecting", channels: [] }),
+  ]);
+  state.applyEvent({
+    seq: 1,
+    ts: 0,
+    kind: "conn",
+    cid: 3,
+    net: "Rizon",
+    extra: { event: "connected" },
+  });
+  assertEquals(state.resolve("rizon").cid, 3);
+  assertEquals(state.resolve("rizon").status, "connected");
+});
+
+Deno.test("findByServer matches the server a connection dialled, ignoring case", () => {
+  const state = new StateModel();
+  state.applyStateFrame([network({ cid: 2, name: "Rizon", server: "irc.rizon.net" })]);
+  assertEquals(state.findByServer("IRC.Rizon.net")?.cid, 2);
+  assertEquals(state.findByServer("irc.efnet.org"), undefined);
 });

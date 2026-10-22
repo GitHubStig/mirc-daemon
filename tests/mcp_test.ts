@@ -12,6 +12,7 @@ const TOKEN = "test-token";
 
 function network(overrides: Partial<NetworkState> = {}): NetworkState {
   return {
+    cid: 1,
     name: "net1",
     server: "irc.example.net",
     port: 6667,
@@ -482,6 +483,139 @@ Deno.test("irc_ison sends nicks as one string, so bracketed nicks survive mSL", 
       s.fake.received.find((c) => c.action === "ison")?.params?.list,
       "[XDCC]Bot absent",
     );
+  } finally {
+    await s.stop();
+  }
+});
+
+// --- multi-connection --------------------------------------------------------
+
+/**
+ * A fake that grows a connection on `connect`, as /server -m does, and reports
+ * it from then on. Returns the cid it handed out so tests can check routing.
+ */
+function growOnConnect(s: Stack, cid: number, name: string): void {
+  s.fake.setHandler((cmd, fake) => {
+    if (cmd.action !== "connect") return undefined;
+    fake.setNetworks([
+      network(),
+      network({ cid, name, server: String(cmd.params?.server), channels: [], members: {} }),
+    ]);
+    return { ok: true, data: { cid } };
+  });
+}
+
+Deno.test("irc_ensure_connected adds a connection and leaves the existing one alone", async () => {
+  const s = await stack();
+  try {
+    growOnConnect(s, 7, "Rizon");
+    const result = await s.client.callTool({
+      name: "irc_ensure_connected",
+      arguments: { network: "Rizon", server: "irc.rizon.net" },
+    });
+    const body = JSON.parse(textOf(result));
+    assertEquals(body.skipped, false);
+    assertEquals(body.network.cid, 7);
+
+    // Both connections are now known, and the original was never told anything.
+    const state = JSON.parse(
+      textOf(await s.client.callTool({ name: "irc_get_state", arguments: {} })),
+    );
+    assertEquals(state.networks.map((n: { name: string }) => n.name).sort(), ["Rizon", "net1"]);
+    assertEquals(s.fake.received.filter((c) => c.action === "connect").length, 1);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("an existing connection is reused, by network name or by server", async () => {
+  const s = await stack();
+  try {
+    // The user's own connection: net1 on irc.example.net.
+    for (
+      const args of [
+        { network: "NET1", server: "irc.elsewhere.net" },
+        { network: "SomethingElse", server: "IRC.example.net" },
+      ]
+    ) {
+      const body = JSON.parse(
+        textOf(await s.client.callTool({ name: "irc_ensure_connected", arguments: args })),
+      );
+      assertEquals(body.skipped, true, JSON.stringify(args));
+      assertEquals(body.network.cid, 1);
+    }
+    const direct = JSON.parse(textOf(
+      await s.client.callTool({ name: "irc_connect", arguments: { server: "irc.example.net" } }),
+    ));
+    assertEquals(direct.skipped, true);
+    assertEquals(s.fake.received.some((c) => c.action === "connect"), false);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("commands go to the connection their network names", async () => {
+  const s = await stack();
+  try {
+    growOnConnect(s, 7, "Rizon");
+    await s.client.callTool({
+      name: "irc_ensure_connected",
+      arguments: { network: "Rizon", server: "irc.rizon.net" },
+    });
+    s.fake.setHandler(undefined);
+
+    await s.client.callTool({
+      name: "irc_send",
+      arguments: { network: "rizon", target: "Bot", text: "xdcc list" },
+    });
+    await s.client.callTool({
+      name: "irc_send",
+      arguments: { network: "net1", target: "#chan", text: "hi" },
+    });
+    const sends = s.fake.received.filter((c) => c.action === "msg");
+    assertEquals(sends.map((c) => c.params?.cid), [7, 1]);
+
+    // With two connected, naming none is refused rather than guessed.
+    const vague = await s.client.callTool({
+      name: "irc_send",
+      arguments: { target: "#chan", text: "which one?" },
+    });
+    assertEquals(textOf(vague).startsWith("ambiguous_network:"), true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("a bot's reply only counts if it comes from the bot's own connection", async () => {
+  const s = await stack();
+  try {
+    growOnConnect(s, 7, "Rizon");
+    await s.client.callTool({
+      name: "irc_ensure_connected",
+      arguments: { network: "Rizon", server: "irc.rizon.net" },
+    });
+    s.fake.setHandler((cmd, fake) => {
+      if (cmd.action !== "msg") return undefined;
+      // Same nick, wrong network first; then the real reply.
+      setTimeout(
+        () =>
+          fake.emit("notice", { cid: 1, net: "net1", buf: "Bot", nick: "Bot", text: "impostor" }),
+        10,
+      );
+      setTimeout(
+        () =>
+          fake.emit("notice", { cid: 7, net: "Rizon", buf: "Bot", nick: "Bot", text: "pack list" }),
+        60,
+      );
+      return undefined;
+    });
+    const body = JSON.parse(textOf(
+      await s.client.callTool({
+        name: "xdcc_list",
+        arguments: { network: "Rizon", bot: "Bot", timeoutMs: 3000, quietMs: 200 },
+      }),
+    ));
+    assertEquals(body.replies.map((e: { text: string }) => e.text), ["pack list"]);
   } finally {
     await s.stop();
   }

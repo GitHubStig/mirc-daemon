@@ -22,6 +22,7 @@ import {
   BridgeFailure,
   type DaemonStatus,
   EVENT_KINDS,
+  type NetworkState,
 } from "../core/types.ts";
 import type { Session, SessionRegistry } from "../core/sessions.ts";
 import { emptyChannelWarning } from "../core/outcomes.ts";
@@ -118,6 +119,22 @@ async function freshen(session: Session, thresholdMs: number): Promise<void> {
   if (error) throw new BridgeFailure(error);
 }
 
+/**
+ * The connection a command acts on, by network name. Every per-connection
+ * command carries the resulting `cid`, and bridge.mrc switches to that
+ * connection before acting: without it, mIRC runs the command on whichever
+ * window happens to be active, which is how a message meant for one network
+ * goes out on another.
+ */
+async function targetOf(
+  session: Session,
+  network: string | undefined,
+  thresholdMs: number,
+): Promise<NetworkState> {
+  await freshen(session, thresholdMs);
+  return session.state.resolve(network);
+}
+
 // Shared argument pieces.
 const sessionArg = z
   .string()
@@ -166,9 +183,13 @@ const connectSchema = z.object({
 });
 const ensureConnectedSchema = z.object({
   session: sessionArg,
-  network: z.string().describe("Network name to report against."),
-  server: z.string().optional().describe("Only needed when the daemon has no such network yet."),
+  network: z.string().describe("Network name, e.g. Rizon. Matched case-insensitively."),
+  server: z
+    .string()
+    .optional()
+    .describe("Server to connect to if mIRC is not on that network yet, e.g. irc.rizon.net."),
   port: z.int().min(1).max(65535).optional(),
+  password: z.string().optional().describe("Server password, if required. Not logged."),
 });
 const joinSchema = z.object({
   session: sessionArg,
@@ -231,6 +252,7 @@ const xdccFetchSchema = z.object({
 });
 const rawSchema = z.object({
   session: sessionArg,
+  network: networkArg,
   line: z.string().min(1),
   confirm: z.literal(true).describe("Must be true, to make this a deliberate choice."),
 });
@@ -410,8 +432,8 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     ({ session, network, channel }: MembersArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        s.state.resolve(network);
-        const outcome = await s.commands.send("members", { channel });
+        const net = await targetOf(s, network, stateFreshnessMs);
+        const outcome = await s.commands.send("members", { cid: net.cid, channel });
         if (!outcome.ok) return failure(outcome.error);
         const names = Array.isArray(outcome.data?.names) ? (outcome.data!.names as string[]) : [];
         return json({
@@ -433,10 +455,10 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     ({ session, network, nicks }: IsonArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        s.state.resolve(network);
+        const net = await targetOf(s, network, stateFreshnessMs);
         // A space-separated string, not an array: mSL found arrays by bracket
         // position, and nicks like [XDCC]Bot contain brackets.
-        const outcome = await s.commands.send("ison", { list: nicks.join(" ") });
+        const outcome = await s.commands.send("ison", { cid: net.cid, list: nicks.join(" ") });
         if (!outcome.ok) return failure(outcome.error);
         const present = Array.isArray(outcome.data?.present)
           ? (outcome.data!.present as string[])
@@ -452,23 +474,59 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
 
   // --- connecting and joining -------------------------------------------
 
+  /**
+   * Open a NEW connection and wait for it to finish registering. bridge.mrc
+   * uses `/server -m`, which adds a connection window; the old `/server`
+   * reused the active one, which dropped whatever the user was connected to.
+   */
+  async function openConnection(
+    s: Session,
+    server: string,
+    port: number | undefined,
+    password: string | undefined,
+  ): Promise<ToolResult> {
+    const outcome = await s.commands.send(
+      "connect",
+      { server, port, password },
+      // EFNet took 32.6 s to register in the live test: ident and DNS checks.
+      { context: "connect", timeoutMs: 60_000 },
+    );
+    if (!outcome.ok) return failure(outcome.error);
+    const error = await s.refreshState();
+    if (error) return failure(error);
+    const cid = typeof outcome.data?.cid === "number" ? outcome.data.cid : undefined;
+    const network = cid === undefined ? undefined : s.state.byCid(cid);
+    return json({ skipped: false, network });
+  }
+
+  /** A connection already serving `server` or `network`, if mIRC has one up. */
+  function existingConnection(s: Session, server?: string, network?: string) {
+    const byNetwork = network ? s.state.find(network) : undefined;
+    if (byNetwork?.status === "connected") return byNetwork;
+    const byServer = server ? s.state.findByServer(server) : undefined;
+    if (byServer?.status === "connected") return byServer;
+    return undefined;
+  }
+
   tool(
     "irc_connect",
     {
       description:
-        "Connect mIRC to an IRC server. Prefer irc_ensure_connected, which skips the step " +
-        "when mIRC is already there.",
+        "Connect mIRC to an IRC server as an ADDITIONAL connection; existing connections are " +
+        "never touched. If mIRC is already connected to that server, it is reused instead. " +
+        "Prefer irc_ensure_connected, which also reuses a connection to the same network " +
+        "through a different server.",
       inputSchema: connectSchema.shape,
     },
     ({ session, server, port, password }: ConnectArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        const outcome = await s.commands.send(
-          "connect",
-          { server, port, password },
-          { context: "connect", timeoutMs: 60_000 },
-        );
-        return fromOutcome(outcome);
+        await freshen(s, stateFreshnessMs);
+        const existing = existingConnection(s, server);
+        if (existing) {
+          return json({ skipped: true, reason: "already connected", network: existing });
+        }
+        return await openConnection(s, server, port, password);
       }),
   );
 
@@ -476,16 +534,17 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     "irc_ensure_connected",
     {
       description:
-        "Make sure mIRC is on a network, connecting only if it is not already. Safe to call " +
-        "when it is already connected.",
+        "Make sure mIRC is on a network. If any connection to that network (or that server) is " +
+        "up, including one the user opened, it is reused. Otherwise a new connection is opened " +
+        "alongside the existing ones, never replacing them.",
       inputSchema: ensureConnectedSchema.shape,
     },
-    ({ session, network, server, port }: EnsureConnectedArgs) =>
+    ({ session, network, server, port, password }: EnsureConnectedArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
         await freshen(s, stateFreshnessMs);
-        const existing = s.state.find(network);
-        if (existing?.status === "connected") {
+        const existing = existingConnection(s, server, network);
+        if (existing) {
           return json({ skipped: true, reason: "already connected", network: existing });
         }
         if (!server) {
@@ -497,14 +556,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
             ),
           );
         }
-        const outcome = await s.commands.send(
-          "connect",
-          { server, port, network },
-          { context: "connect", timeoutMs: 60_000 },
-        );
-        if (!outcome.ok) return failure(outcome.error);
-        await s.refreshState();
-        return json({ skipped: false, data: outcome.data ?? {}, network: s.state.find(network) });
+        return await openConnection(s, server, port, password);
       }),
   );
 
@@ -519,9 +571,10 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     ({ session, network, channel, key }: JoinArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        await freshen(s, stateFreshnessMs);
-        const net = s.state.resolve(network);
-        const outcome = await s.commands.send("join", { channel, key }, { context: "join" });
+        const net = await targetOf(s, network, stateFreshnessMs);
+        const outcome = await s.commands.send("join", { cid: net.cid, channel, key }, {
+          context: "join",
+        });
         if (!outcome.ok) return failure(outcome.error);
 
         const members = typeof outcome.data?.members === "number"
@@ -543,8 +596,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     ({ session, network, channel }: EnsureJoinedArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        await freshen(s, stateFreshnessMs);
-        const net = s.state.resolve(network);
+        const net = await targetOf(s, network, stateFreshnessMs);
         if (s.state.isJoined(net, channel)) {
           return json({
             skipped: true,
@@ -553,7 +605,9 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
             members: s.state.memberCount(net, channel),
           });
         }
-        const outcome = await s.commands.send("join", { channel }, { context: "join" });
+        const outcome = await s.commands.send("join", { cid: net.cid, channel }, {
+          context: "join",
+        });
         if (!outcome.ok) return failure(outcome.error);
         const members = typeof outcome.data?.members === "number"
           ? outcome.data.members
@@ -577,8 +631,8 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     ({ session, network, channel }: PartArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        s.state.resolve(network);
-        return fromOutcome(await s.commands.send("part", { channel }));
+        const net = await targetOf(s, network, stateFreshnessMs);
+        return fromOutcome(await s.commands.send("part", { cid: net.cid, channel }));
       }),
   );
 
@@ -596,8 +650,10 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     ({ session, network, target, text }: SendArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        s.state.resolve(network);
-        return fromOutcome(await s.commands.send("msg", { target, text }, { context: "message" }));
+        const net = await targetOf(s, network, stateFreshnessMs);
+        return fromOutcome(
+          await s.commands.send("msg", { cid: net.cid, target, text }, { context: "message" }),
+        );
       }),
   );
 
@@ -610,9 +666,9 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     ({ session, network, target, text }: SendArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        s.state.resolve(network);
+        const net = await targetOf(s, network, stateFreshnessMs);
         return fromOutcome(
-          await s.commands.send("notice", { target, text }, { context: "message" }),
+          await s.commands.send("notice", { cid: net.cid, target, text }, { context: "message" }),
         );
       }),
   );
@@ -709,15 +765,18 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     ({ session, network, bot, timeoutMs, quietMs }: XdccListArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        s.state.resolve(network);
+        const net = await targetOf(s, network, stateFreshnessMs);
         const cursor = s.log.cursor;
         const deadline = Date.now() + (timeoutMs ?? 20_000);
-        const sent = await s.commands.send("msg", { target: bot, text: "xdcc list" }, {
-          context: "message",
-        });
+        const sent = await s.commands.send(
+          "msg",
+          { cid: net.cid, target: bot, text: "xdcc list" },
+          { context: "message" },
+        );
         if (!sent.ok) return failure(sent.error);
 
-        const matcher: WaitMatcher = { nick: bot, direct: true };
+        // Only this connection: the same nick can belong to someone else elsewhere.
+        const matcher: WaitMatcher = { cid: net.cid, nick: bot, direct: true };
         const first = await waitForEvent({
           log: s.log,
           bus: s.bus,
@@ -781,8 +840,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         };
 
         // 1. connected?
-        await freshen(s, stateFreshnessMs);
-        const net = s.state.resolve(network);
+        const net = await targetOf(s, network, stateFreshnessMs);
         if (net.status !== "connected") {
           return await fail(
             bridgeError(
@@ -796,7 +854,9 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
 
         // 2. joined?
         if (!s.state.isJoined(net, channel)) {
-          const joined = await s.commands.send("join", { channel }, { context: "join" });
+          const joined = await s.commands.send("join", { cid: net.cid, channel }, {
+            context: "join",
+          });
           if (!joined.ok) return await fail(joined.error);
           steps.push("joined");
         } else {
@@ -806,7 +866,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         // 3. is the bot actually here? Failing now beats waiting for a timeout.
         // Ask about the one nick rather than fetching the list: XDCC channels run to
         // thousands of users, far past what one frame can carry.
-        const members = await s.commands.send("members", { channel, nick: bot });
+        const members = await s.commands.send("members", { cid: net.cid, channel, nick: bot });
         if (members.ok && typeof members.data?.present === "boolean") {
           if (!members.data.present) {
             return await fail(
@@ -825,17 +885,17 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
 
         const sent = await s.commands.send(
           "msg",
-          { target: bot, text: `xdcc send #${pack.replace(/^#/, "")}` },
+          { cid: net.cid, target: bot, text: `xdcc send #${pack.replace(/^#/, "")}` },
           { context: "message" },
         );
         if (!sent.ok) return await fail(sent.error);
         steps.push("requested");
 
-        // 5. wait for the bot to say something back.
+        // 5. wait for the bot to say something back, on this connection only.
         const reply = await waitForEvent({
           log: s.log,
           bus: s.bus,
-          matcher: { nick: bot, direct: true },
+          matcher: { cid: net.cid, nick: bot, direct: true },
           since: cursor,
           timeoutMs: waitMs,
         });
@@ -871,7 +931,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         "it can do anything the IRC protocol can.",
       inputSchema: rawSchema.shape,
     },
-    ({ session, line }: RawArgs) =>
+    ({ session, network, line }: RawArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
         if (!allowRaw) {
@@ -884,7 +944,8 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
             ),
           );
         }
-        return fromOutcome(await s.commands.send("raw", { line }));
+        const net = await targetOf(s, network, stateFreshnessMs);
+        return fromOutcome(await s.commands.send("raw", { cid: net.cid, line }));
       }),
   );
 }

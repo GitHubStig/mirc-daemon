@@ -27,3 +27,4 @@ wrong — fix whichever it is in the same change.
 | 0009 | Failure taxonomy and pre-flight checks                           | accepted |
 | 0010 | Relay DCC outcomes, not progress                                 | accepted |
 | 0011 | Topology and the filesystem boundary                             | accepted |
+| 0012 | Many connections, addressed by mIRC's connection id              | accepted |

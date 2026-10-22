@@ -9,8 +9,11 @@
  *
  * 2: string command params are base64. A v1 bridge.mrc would post the encoded
  *    text verbatim, so a mismatched hello is refused rather than tolerated.
+ * 3: multi-connection. Events carry `cid`, commands name the connection they
+ *    act on, and `state` is replaced by `conns` + `chans`. A v2 script would
+ *    run every command on whichever window happened to be active.
  */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 /** mIRC's line limit is just under 4150 bytes; leave headroom. */
 export const MAX_FRAME_BYTES = 3500;
@@ -83,7 +86,15 @@ export function sameNetwork(a: string | undefined, b: string | undefined): boole
   return a !== undefined && b !== undefined && a.toLowerCase() === b.toLowerCase();
 }
 
+/**
+ * One mIRC connection. The name says "network" because that is how agents
+ * address it, but the identity is `cid`: two connections can share a network,
+ * and a connection has no network name until the server announces one.
+ */
 export interface NetworkState {
+  /** mIRC's connection id ($cid). Stable for as long as the connection window exists. */
+  cid: number;
+  /** The network name ($network), or the server name until the network is known. */
   name: string;
   server?: string;
   port?: number;
@@ -91,7 +102,7 @@ export interface NetworkState {
   /** Our current nick on this network. Authoritative; see §8. */
   nick: string;
   channels: string[];
-  /** Channel name → member count, as reported by the `state` action. */
+  /** Channel name → member count, as reported by the `chans` action. */
   members: Record<string, number>;
 }
 
@@ -119,12 +130,22 @@ export interface ResFrame {
 }
 
 /**
- * Shape of `res.data` for the `state` action: what mIRC reports about itself.
- * Carried inside the normal command reply rather than as a bespoke frame, so the
- * dispatcher has exactly one reply mechanism and one correlation path.
+ * Shape of `res.data` for the `conns` action: every connection mIRC has, one
+ * line each. Channels come separately, per connection, from `chans`, so that
+ * no single frame has to describe everything mIRC is in. Both are carried in
+ * the normal command reply, so the dispatcher keeps one reply mechanism and
+ * one correlation path.
  */
-export interface StatePayload {
-  networks: NetworkState[];
+export interface ConnsPayload {
+  conns: Array<{ cid: number; net?: string; server?: string; status: string; nick: string }>;
+  /** mIRC's DCC send-request setting ($sreq): "auto", "ask" or "ignore". */
+  sreq?: string;
+}
+
+/** Shape of `res.data` for the `chans` action: one connection's channels. */
+export interface ChansPayload {
+  channels: string[];
+  members: Record<string, number>;
 }
 
 export interface PongFrame {
@@ -162,6 +183,8 @@ export type EventKind = typeof EVENT_KINDS[number];
 export interface EventFrame {
   t: "ev";
   kind: EventKind;
+  /** The connection the event happened on. The network name alone is ambiguous. */
+  cid?: number;
   net: string;
   buf?: string;
   nick?: string;
@@ -185,7 +208,8 @@ export type InboundFrame = HelloFrame | ResFrame | PongFrame | EventFrame;
 // ---------------------------------------------------------------------------
 
 export type ActionName =
-  | "state"
+  | "conns"
+  | "chans"
   | "connect"
   | "join"
   | "part"
@@ -237,13 +261,15 @@ export interface BridgeEvent {
   seq: number;
   ts: number;
   kind: EventKind;
+  /** mIRC's connection id; absent only from frames that predate protocol v3. */
+  cid?: number;
   net: string;
   /** IRC window: a channel (`#chan`) or a query (a nick). */
   buf?: string;
   nick?: string;
   user?: string;
   text?: string;
-  /** The raw server line, for `kind === "raw"`. */
+  /** For `kind === "raw"`: the numeric then its parameters; see EventFrame. */
   raw?: string;
   /** kind-specific payload. */
   extra?: Record<string, unknown>;
