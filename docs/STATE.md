@@ -5,9 +5,10 @@ decision see `docs/adr/`. This file is about what is true **right now**.
 
 ## Short version
 
-The pipe works end to end. A real mIRC attaches to the daemon, answers its state query, and mirrors
-traffic. What remains is exercising the agent side against a live daemon and the XDCC flow —
-ordinary work against a working transport.
+The whole chain works end to end: an MCP client drove a real mIRC on EFNet through the daemon, and a
+message with quotes, a backslash, `ü` and a bold code went out and came back byte for byte. What
+remains is the XDCC flow, the failure paths that need a hostile channel or a second network, and DCC
+recon.
 
 ## Verified
 
@@ -23,33 +24,41 @@ Proven by running it, with evidence in the log:
   the 20-tool MCP surface driven by the SDK's own client, and the frame shapes `bridge.mrc` emits
   (`tests/bridge_contract_test.ts`).
 - **The mSL script** sends and receives: the read loop drains, dispatch parses, replies go out.
+- **Protocol v2 in mIRC** (2026-10-22): the hello carries `"v":2` and is accepted. `/bridge.diag`
+  prints `jval-test t=cmdid=c1action=state` (the pieces are joined without spaces; the values are
+  what matter) and `b64-test ok`, so `$decode` through a binvar and `$bvar().text` decode UTF-8 as
+  the daemon encodes it.
+- **The agent path, live** (2026-10-22): an MCP client using the SDK drove the real daemon and mIRC
+  on EFNet.
+  - `daemon_status`, `irc_get_state` and `irc_members` returned the live network, channel and
+    members.
+  - `irc_ison` made a real server round trip, with present and absent nicks both reported correctly.
+  - `irc_join` on a channel already joined returned at once with `already: true`, and
+    `irc_ensure_joined` skipped it.
+  - `irc_notify` echoed into mIRC.
+  - `irc_send` to our own nick, then `irc_wait_for`: a line with a quote pair, a backslash, `ü` and
+    a bold code came back from the server **byte for byte** in about 220 ms. That also proves an
+    inbound control character survives `jstr` and parses.
+  - `irc_read` paged it from a cursor.
 
 ## Not verified
 
-Assumed or untested. Treat these as the actual risk surface:
+Assumed or untested. Treat these as the actual risk surface. The remaining live checks for the audit
+fixes, in order:
 
-- **The audit fixes and protocol v2 have never run in mIRC.** The handshake above was proven with
-  the v1 script, which the daemon now refuses: copy the repo's `bridge.mrc` into the mIRC folder
-  before anything else, or mIRC will print "daemon refused" and stop. The string handling is
-  mirrored in TypeScript in `tests/bridge_contract_test.ts`, which pins down the algorithm, not the
-  mSL. Then check, in this order:
-  1. `/bridge.diag` prints `jval-test t=cmd id=c1 action=state` **and `b64-test ok`**. The second is
-     the param decoder running inside mIRC on a string with a quote pair, a backslash, `ü` and a
-     bold code. If it fails, nothing that sends text will work, so stop there. The likeliest suspect
-     is whether `$bvar().text` decodes UTF-8.
-  2. Someone sends a **bold or coloured** line in a channel: it shows in `irc_read` with its
-     formatting codes, and `deno task log:tail` shows no `mbp.bad-frame`.
-  3. `irc_send` with `say "hi" C:\dir ü` arrives in the channel exactly like that.
-  4. `irc_join` on a channel you are already in returns at once with `already: true`. On a channel
-     that refuses you, it fails with a code within 8s.
-  5. `irc_members` on a large channel returns `truncated: true` rather than timing out.
-  6. Start mIRC with the daemon **down**, then start the daemon: mIRC attaches within 10s.
-  7. `irc_connect` while already connected: no spurious `connect_failed` before the new connection
-     comes up (see `%bridge_conn_skipdc`).
-  8. A private message lands in `irc_read` with `buffer` set to the sender's nick.
+1. Someone **else** sends a bold or coloured line, or a NOTICE: it shows in `irc_read` with its
+   formatting codes, and `deno task log:tail` shows no `mbp.bad-frame`. (Our own echo proved the
+   TEXT path, not NOTICE.)
+2. `irc_join` on a channel that refuses you fails with a code within 8s.
+3. `irc_members` on a large channel returns `truncated: true` rather than timing out.
+4. Start mIRC with the daemon **down**, then start the daemon: mIRC attaches within 10s.
+5. `irc_connect` while already connected: no spurious `connect_failed` before the new connection
+   comes up (see `%bridge_conn_skipdc`).
+6. A private message **from someone else** lands in `irc_read` with `buffer` set to the sender's
+   nick. (Messaging ourselves cannot tell the two apart.)
 
-- **The agent path has never been driven against the live daemon.** Every MCP test uses `fake_mirc`.
-  So "an agent calls `irc_send` and a message appears in a channel" is unproven.
+Beyond those:
+
 - **XDCC is unproven.** `xdcc_list` and `xdcc_fetch` have only run against the fake.
 - **DCC recon is outstanding**: which identifiers `FILERCVD`/`GETFAIL` actually populate, and — the
   decisive one — whether `GETFAIL` fires when a transfer stalls _without_ the connection breaking.
