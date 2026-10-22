@@ -82,6 +82,20 @@ marks `openedByAgent` and `joinedByAgent`, so the agent can see the line.
 Connections inherit the user's nick, with no agent nick. `irc_disconnect` quits with mIRC's own
 default message unless the agent is given one.
 
+**A receipt is permission, never a trigger.** Nothing leaves or disconnects by itself, and neither
+does `xdcc_fetch`. The agent leaves a channel, disconnects or changes nick only when the user asked,
+or the task the user gave includes it ("get pack 5, then disconnect"). A finished transfer alone is
+not a reason. The receipt only decides whether that action also needs `confirm: true`.
+
+**Quit windows are reused.** mIRC keeps a connection's window after it quits, and opening a new one
+(`/server -m`) on every trip piled them up. When the agent needs a network that has a quit window,
+it reconnects that window in place, preferring its own. Reconnecting the user's quit window earns no
+receipt: it stays the user's, so disconnecting it again needs `confirm: true`. The one visible
+difference from a new window is that mIRC may rejoin channels that were still open in it when the
+user quit. Channels the user left before quitting do not come back, and auto-join and Perform run on
+any connect to that network either way. A live connection is never a candidate, and `bridge.mrc`
+refuses to reconnect a window that is not disconnected (`connection-busy`).
+
 **Renames are surfaced.** Each connection records its last nick change (`renamed: {from, to}`),
 which survives refreshes. The typical cause is services: on Rizon, NickServ renamed the user's nick
 to `Guest28669` 20 s after connecting, because the nick is registered to someone else. A later 477
