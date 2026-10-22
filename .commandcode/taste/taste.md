@@ -1,2 +1,16 @@
 # Taste
-See [taste/taste.md](taste/taste.md)
+- Prefers unrelated work to land as its own standalone, topically-scoped commit rather than being folded into an in-progress commit. Confidence: 0.7
+- Never wants a `Co-authored-by` trailer or any co-author line added to commit messages ("never ever"). Confidence: 0.9
+- Prefers Conventional Commits style — a `type(scope): subject` header with a paragraph-length body explaining what was done and why. Confidence: 0.85
+- Wants work to stop at each major phase/step so they can review the code before anything is committed — review checkpoints over continuous building. Confidence: 0.85
+- Prefers durable project rules to live in a harness-agnostic `AGENTS.md` at the repo root rather than tool-specific config files, so any AI coding agent picks them up. Confidence: 0.7
+- Prefers simple, flat file layouts over nested or self-referential structures. Confidence: 0.55
+- Issues terse one-word commands ("resume", "yes", "done", "commit", "all good proceed") and expects the agent to pick up from existing context and continue the work directly, without a recap, re-planning, or confirmation prompts. Confidence: 0.7
+- Security-conscious about secrets: wants tokens/credentials kept out of tracked files and command lines, treats any token that has appeared in logs, shell history or terminal output as compromised and burns it, and wants leaks eliminated by design (e.g. reading the secret from a dedicated config file) rather than cleaned up after the fact. Confidence: 0.6
+- Treats tool/harness-managed directories (e.g. `.commandcode/`) as machine-managed and off-limits to manual agent edits, and prefers the agent ask before touching them. Confidence: 0.6
+- Prefers auto-collected / machine-generated tool files (e.g. the permission collector's `settings.json`) be gitignored wholesale rather than curated and kept tracked, since they are transcripts of a session rather than shareable convention. Confidence: 0.55
+- Dependency-minimalist: dislikes heavy third-party dependencies and large transitive dependency trees, and wants them recorded as known debt with an explicit exit path — replacing them later with something lighter or hand-rolling the needed piece. Confidence: 0.65
+- Once a phase of work is complete, wants it committed before the agent moves on to the next phase, rather than left uncommitted or held up on further polish. Confidence: 0.65
+- Cost-conscious about AI usage budgets: tracks weekly/monthly quota consumption, and near a limit wants the remaining budget spent on making a handover cheap (state docs, cleanup, verified-vs-assumed notes) rather than new feature work, weighing "switch to free models" against "hand over to a stronger model". Confidence: 0.6
+- Expects dependencies to be pinned to the newest supported major version, and will question an outdated pin ("why aren't we using zod v4?"); a pin to an older major needs a documented justification in the code or an ADR, not habit. Confidence: 0.6
+- Wants code to adopt the current major's idiom and avoid legacy/deprecated APIs even when the old ones still work — explicitly to avoid a deprecation/migration burden later ("use v4 specific apis if possible, don't want to worry about deprecating stuff later on"). Confidence: 0.7
