@@ -430,8 +430,23 @@ Deno.test("xdcc_fetch asks about the one bot, and an advert is not taken for its
     s.fake.setHandler((cmd, fake) => {
       if (cmd.action === "members") return { ok: true, data: { count: 4000, present: true } };
       if (cmd.action === "msg") {
-        setTimeout(() => fake.emit("text", { buf: "#chan", nick: "Bot", text: "advert" }), 10);
-        setTimeout(() => fake.emit("notice", { buf: "Bot", nick: "Bot", text: "Sending" }), 60);
+        // An advert that looks like a refusal must not settle the job...
+        setTimeout(
+          () => fake.emit("text", { buf: "#chan", nick: "Bot", text: "** Invalid Pack Number" }),
+          10,
+        );
+        // ...the bot's real answer, then its DCC offer, as iroffer sends them.
+        setTimeout(() =>
+          fake.emit("notice", {
+            buf: "Bot",
+            nick: "Bot",
+            text: '** Sending you pack #42 ("pack042.iso"), which is 1MB.',
+          }), 40);
+        setTimeout(() =>
+          fake.emit("ctcp", {
+            nick: "Bot",
+            extra: { ctcp: "DCC", text: "SEND pack042.iso 3232235777 5000 1048576" },
+          }), 70);
       }
       return undefined;
     });
@@ -440,7 +455,13 @@ Deno.test("xdcc_fetch asks about the one bot, and an advert is not taken for its
       arguments: { channel: "#chan", bot: "Bot", pack: "42", timeoutMs: 3000 },
     });
     const body = JSON.parse(textOf(result));
-    assertEquals(body.reply.text, "Sending");
+    // The "Sending you" reply alone settles the wait; the offer may land just after.
+    assertEquals(body.job.requestedBy, { bot: "Bot", pack: "42" });
+    assertEquals(body.job.file, "pack042.iso");
+    assertEquals(body.mircAccepts, "auto");
+    const job = s.mirc.registry.resolve()!.dcc.get(body.job.id)!;
+    await until(() => job.state === "offered", { label: "offer" });
+    assertEquals(job.size, 1048576);
 
     const members = s.fake.received.find((c) => c.action === "members");
     assertEquals(members?.params?.nick, "Bot");
@@ -934,5 +955,127 @@ Deno.test("GET and DELETE on /mcp are 405, so no endless event stream is ever op
     const started = Date.now();
     await s.stop();
     assertEquals(Date.now() - started < 2000, true);
+  }
+});
+
+// --- XDCC jobs through MCP -----------------------------------------------------
+
+/** A fake bot that is present and answers an `xdcc send` with `reply` after `ms`. */
+function botAnswers(s: Stack, reply: string | undefined, ms = 30): void {
+  s.fake.setHandler((cmd, fake) => {
+    if (cmd.action === "members") return { ok: true, data: { count: 50, present: true } };
+    if (cmd.action === "msg" && reply !== undefined) {
+      setTimeout(() => fake.emit("notice", { buf: "Bot", nick: "Bot", text: reply }), ms);
+    }
+    return undefined;
+  });
+}
+
+const fetchArgs = { channel: "#chan", bot: "Bot", pack: "6", notifyOnFailure: false };
+
+Deno.test("xdcc_fetch: a refusal is bot_refused with the bot's words and the reason", async () => {
+  const s = await stack();
+  try {
+    botAnswers(s, "** Invalid Pack Number, Try Again");
+    const result = await s.client.callTool({
+      name: "xdcc_fetch",
+      arguments: { ...fetchArgs, timeoutMs: 3000 },
+    });
+    assertEquals(textOf(result).startsWith("bot_refused:"), true);
+    assertEquals(textOf(result).includes("no such pack"), true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("xdcc_fetch: a queued request returns the position and keeps the job open", async () => {
+  const s = await stack();
+  try {
+    botAnswers(
+      s,
+      '** All Slots Full, Added you to the main queue for pack 6 ("x.iso") in position 4.',
+    );
+    const body = JSON.parse(textOf(
+      await s.client.callTool({ name: "xdcc_fetch", arguments: { ...fetchArgs, timeoutMs: 3000 } }),
+    ));
+    assertEquals(body.job.state, "queued");
+    assertEquals(body.job.position, 4);
+    assertEquals(body.next.includes("position 4"), true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("xdcc_fetch: no answer yet is not an error, and irc_dcc_watch catches the late one", async () => {
+  const s = await stack();
+  try {
+    botAnswers(s, undefined);
+    const body = JSON.parse(textOf(
+      await s.client.callTool({ name: "xdcc_fetch", arguments: { ...fetchArgs, timeoutMs: 600 } }),
+    ));
+    assertEquals(body.job.state, "requested");
+    assertEquals(body.next.includes("keeps listening"), true);
+
+    // The bot answers minutes later, as AxA-MP1 did; here, while a watch waits.
+    const watching = s.client.callTool({
+      name: "irc_dcc_watch",
+      arguments: { job: body.job.id, timeoutMs: 3000 },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    s.fake.emit("notice", {
+      buf: "Bot",
+      nick: "Bot",
+      text: "** You have been queued in position 2",
+    });
+    const watched = JSON.parse(textOf(await watching));
+    assertEquals(watched.changed, true);
+    assertEquals(watched.from, "requested");
+    assertEquals(watched.job.state, "queued");
+
+    const status = JSON.parse(textOf(
+      await s.client.callTool({ name: "irc_dcc_status", arguments: { job: body.job.id } }),
+    ));
+    assertEquals(status.job.position, 2);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("xdcc_fetch: mIRC set to ignore DCC sends is refused before asking the bot", async () => {
+  const s = await stack();
+  try {
+    s.mirc.registry.resolve()!.sreq = "ignore";
+    botAnswers(s, "never asked");
+    const result = await s.client.callTool({ name: "xdcc_fetch", arguments: fetchArgs });
+    assertEquals(textOf(result).startsWith("dcc_failed:"), true);
+    assertEquals(textOf(result).includes("IGNORE"), true);
+    assertEquals(s.fake.received.some((c) => c.action === "msg"), false);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("xdcc_list: 'XDCC LIST Denied' is bot_refused, not a pack list", async () => {
+  const s = await stack();
+  try {
+    s.fake.setHandler((cmd, fake) => {
+      if (cmd.action === "msg") {
+        // AxA-MP1's real reply, 2026-10-22.
+        setTimeout(
+          () =>
+            fake.emit("notice", { buf: "Bot", nick: "Bot", text: "** XDCC LIST Denied. Nope!" }),
+          20,
+        );
+      }
+      return undefined;
+    });
+    const result = await s.client.callTool({
+      name: "xdcc_list",
+      arguments: { bot: "Bot", timeoutMs: 3000, quietMs: 200 },
+    });
+    assertEquals(textOf(result).startsWith("bot_refused:"), true);
+    assertEquals(textOf(result).includes("website"), true);
+  } finally {
+    await s.stop();
   }
 });

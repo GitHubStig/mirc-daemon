@@ -1,6 +1,6 @@
 # 0012. Many connections, addressed by mIRC's connection id
 
-**Status:** accepted (phases 1 and 2 implemented; XDCC start follows)
+**Status:** accepted (all three phases implemented)
 
 ## Context
 
@@ -103,11 +103,12 @@ to `Guest28669` 20 s after connecting, because the nick is registered to someone
 was renamed, and that the user can identify with NickServ or switch nick with `irc_nick`. The user
 can also change nick in mIRC directly; the daemon follows either way.
 
-## Still to come
+## Phase 3: XDCC start
 
-- **Phase 3: XDCC start.** Recognise the bot's `DCC SEND` offer (already mirrored as a CTCP) as the
-  start of a transfer, and use the reported `$sreq` to tell the agent the truth when mIRC is set to
-  ask or to ignore.
+Implemented as an amendment to ADR-0010: jobs that follow the bot in the background, the `DCC SEND`
+offer as the start of a transfer, the bot's replies read for their meaning, and `$sreq` reported up
+front. Jobs record the `cid` they were requested on, so a reply or offer only counts from the bot's
+own connection.
 
 ## Consequences
 

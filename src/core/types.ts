@@ -287,18 +287,35 @@ export interface SessionInfo {
   connectedTs: number;
 }
 
-export type DccState = "in_flight" | "complete" | "failed";
+/**
+ * Where a transfer stands. A requested pack moves requested → (queued) →
+ * offered → complete, or ends refused or failed. The three before the end are
+ * "active". Tracked in the background, because a busy bot can take minutes to
+ * answer and no tool call can wait that long (clients give up after ~60 s).
+ */
+export type DccState = "requested" | "queued" | "offered" | "complete" | "refused" | "failed";
+
+export const ACTIVE_DCC_STATES: ReadonlySet<DccState> = new Set(["requested", "queued", "offered"]);
 
 export interface DccJob {
   id: string;
+  /** The connection the request went out on, and where replies count from. */
+  cid?: number;
   net: string;
-  /** Unknown until mIRC reports the transfer, since there is no pre-transfer hook. */
+  /** From the bot's reply or its DCC offer; unknown until one of them says. */
   file?: string;
   size?: number;
   state: DccState;
   startedTs: number;
+  /** When the state last changed. */
+  updatedTs: number;
   endedTs?: number;
   secs?: number;
+  /** Queue position, while `queued`. */
+  position?: number;
+  /** The bot's last reply, formatting removed: what to show a person. */
+  lastReply?: string;
+  /** Why it was refused or failed, in the bot's or mIRC's words. */
   detail?: string;
   /** Set when the job was opened by a tool call that asked for it. */
   requestedBy?: { bot: string; pack?: string };

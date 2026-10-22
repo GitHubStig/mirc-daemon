@@ -503,3 +503,22 @@ Deno.test("jstr output is valid JSON that decodes to the original", () => {
     assertEquals(JSON.parse(mslJstr(text)), text);
   }
 });
+
+Deno.test("a DCC SEND offer, framed as bridge.mrc's on CTCP frames it, opens the job's transfer", async () => {
+  const h = await attach();
+  try {
+    const session = h.session()!;
+    const job = session.dcc.start({ cid: 1, net: "net1", bot: "WG|LinuxOs|01", pack: "1" });
+    // on CTCP sends $1 as `ctcp` and $2- as `text`; a quoted name keeps its quotes.
+    const rest = 'SEND "debian 12.iso" 3232235777 5000 661651456';
+    h.mirc.sendLine(
+      `{"t":"ev","kind":"ctcp","cid":1,"net":"net1","nick":"WG|LinuxOs|01",` +
+        `"extra":{"ctcp":"DCC","text":${mslJstr(rest)}}}`,
+    );
+    await until(() => job.state === "offered", { label: "offer" });
+    assertEquals(job.file, "debian 12.iso");
+    assertEquals(job.size, 661651456);
+  } finally {
+    await h.stop();
+  }
+});

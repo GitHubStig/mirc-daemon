@@ -18,7 +18,7 @@ Proven by running it, with evidence in the log:
   daemon's state model then holds the network, the joined channel and member counts.
 - **Daemon runs**: `deno task start` binds `127.0.0.1:8686` (mIRC, raw TCP) and `127.0.0.1:8687`
   (agents, HTTP). `/health` is unauthenticated, `/status` and `/mcp` require the bearer token.
-- **198 automated tests** (`deno task test`): MBP framing including CRLF and oversize rejection,
+- **216 automated tests** (`deno task test`): MBP framing including CRLF and oversize rejection,
   logging with redaction, the state model, the event log and waits, credit-limited command dispatch,
   the failure taxonomy, DCC outcome tracking, the listener, config, the INI reader, the HTTP door,
   the 20-tool MCP surface driven by the SDK's own client, and the frame shapes `bridge.mrc` emits
@@ -100,6 +100,14 @@ Proven by running it, with evidence in the log:
   The same window was reconnected in place (`reusedWindow: "agent's"`), in 27.6 s, so mIRC kept one
   Rizon window instead of two. That is the same `/server`-in-a-quit-window path used for the user's
   windows; only the daemon's ownership decision differs, and that is unit-tested.
+- **Up to the bot, on a busy XDCC channel** (2026-10-22, Rizon `#DEPOT`; no pack was requested).
+  - The agent's quit window was reconnected in place.
+  - The join answered in 743 ms (236 members). The bot was confirmed online via ISON in 300 ms, and
+    the member list came back in 41 ms.
+  - `xdcc list` was answered with `** XDCC LIST Denied. Nope!`, but **3 m 42 s later**. The reply
+    arrived intact on the right connection, buffered under the bot's nick.
+  - That delay is why jobs are now tracked in the background and no tool waits more than 55 s
+    (ADR-0010 amendment).
 
 ## Not verified
 
@@ -117,13 +125,31 @@ Carried over:
    `/join #some-test`, `/mode #some-test +i`, and stay in it. With a 477 refusal, also check that
    the hint names the current nick and any services rename.
 
+**XDCC end-to-end (phase 3) has never seen a real transfer.** The next live run is a Linux
+distribution bot: `irc.williamgattone.it`, `#William&Gattone`, bot `WG|LinuxOs|01`, pack #1. First
+confirm the pack is a Linux image (from the list, or the bot's "Sending you pack" reply). Then
+check:
+
+1. Joining a channel whose name contains `&`, and messaging a nick containing `|` (mSL's command
+   separator), both work.
+2. The bot's reply moves the job: `queued` with a position, or straight to the offer.
+3. **Does mIRC pass the `DCC SEND` offer to the script's `on CTCP`?** If it does, the job goes to
+   `offered` with the file and size. If it does not, the job stays `requested` until `FILERCVD`.
+   Then the offer needs another source (e.g. `on *:CTCP:DCC SEND*` or a raw handler).
+4. With `sreq: auto`, the transfer starts unattended, and `FILERCVD` settles the job as `complete`.
+   This also answers which identifiers it populates (`$filename`, `$nick`).
+5. **DCC recon**: cancel a second transfer part-way. Does `GETFAIL` fire, and with what? The
+   decisive case remains whether it fires when a transfer stalls _without_ the connection breaking.
+   If it does not, the liveness-only stall check described in ADR-0010 is needed.
+
 Beyond those:
 
-- **XDCC is unproven.** `xdcc_list` and `xdcc_fetch` have only run against the fake.
-- **DCC recon is outstanding**: which identifiers `FILERCVD`/`GETFAIL` actually populate, and — the
-  decisive one — whether `GETFAIL` fires when a transfer stalls _without_ the connection breaking.
-  If it does not, the liveness-only stall check described in ADR-0010 is needed.
 - **`raw` gating** is implemented as default-deny but only exercised as "denied".
+- **Known gaps, deliberately not built for.** A daemon restart mid-transfer loses the in-memory job.
+  mIRC's later "file received" then shows up as a job nobody requested: visible, but no longer tied
+  to its request. And events while the bridge link is down are dropped, because mSL does not queue
+  them, by design. The daemon is not expected to restart once stable, rereading its own log could
+  pick up stale entries, and mSL stays simple.
 
 ## Traps that all failed silently
 
@@ -203,13 +229,11 @@ In mIRC: `/load -rs bridge.mrc` then `/bridge.start`. Available while debugging:
 
 ## Next, in order
 
-1. **Close the remaining live gaps** under "Not verified" when the chance arises.
-2. **The refused-join check**, when someone can hold a `+i` channel.
-3. **Multi-connection phase 3: XDCC start**: recognise the bot's `DCC SEND` offer, and report
-   `$sreq` honestly (auto, ask or ignore).
-4. **XDCC end-to-end** against a real bot on another network, with EFNet left untouched.
-5. **Recon** the DCC questions above and delete the guesswork from ADR-0010.
-6. **Cleanup**: decide whether `--allow-raw` is needed; consider a daemon-side heartbeat so a dead
+1. **XDCC end-to-end** against the Linux bot under "Not verified", with EFNet left untouched. It
+   doubles as the DCC recon.
+2. **Close the remaining live gaps** under "Not verified" when the chance arises, including the
+   refused-join check when someone can hold a `+i` channel.
+3. **Cleanup**: decide whether `--allow-raw` is needed; consider a daemon-side heartbeat so a dead
    link is noticed without waiting on TCP.
 
 ## Shape of the thing

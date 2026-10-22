@@ -21,6 +21,7 @@ import {
   type BridgeEvent,
   BridgeFailure,
   type DaemonStatus,
+  type DccJob,
   EVENT_KINDS,
   type NetworkState,
   sameNetwork,
@@ -28,6 +29,7 @@ import {
 import type { Session, SessionRegistry } from "../core/sessions.ts";
 import { emptyChannelWarning } from "../core/outcomes.ts";
 import { waitForEvent, type WaitMatcher } from "../core/waits.ts";
+import { classifyBotReply } from "../core/xdcc.ts";
 import type { LogSink } from "../core/log.ts";
 
 export interface ToolOptions {
@@ -167,6 +169,54 @@ function explainJoinRefusal(error: BridgeError, net: NetworkState): BridgeError 
   };
 }
 
+/**
+ * The longest any tool waits. MCP clients give up on a call after about 60 s
+ * (the SDK's default request timeout), so a longer wait does not wait longer:
+ * it turns into a client-side error, and the result is lost. Anything slower
+ * than this is tracked in the background and checked on again.
+ */
+const MAX_WAIT_MS = 55_000;
+
+/**
+ * Wait until `settled(job)` holds or `timeoutMs` passes. Jobs are moved by the
+ * event stream (Session.record updates them before fanning out), so checking
+ * on every event is enough. Resolves true if it settled.
+ */
+function waitForJob(
+  session: Session,
+  job: DccJob,
+  settled: (job: DccJob) => boolean,
+  timeoutMs: number,
+): Promise<boolean> {
+  if (settled(job)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const stop = (result: boolean) => {
+      clearTimeout(timer);
+      unsubscribe();
+      resolve(result);
+    };
+    const timer = setTimeout(() => stop(false), timeoutMs);
+    const unsubscribe = session.bus.on(() => {
+      if (settled(job)) stop(true);
+    });
+  });
+}
+
+/** What mIRC will do with an offer, from its DCC send-request setting ($sreq). */
+function acceptance(session: Session): string {
+  switch (session.sreq) {
+    case "auto":
+      return "mIRC accepts DCC sends automatically, so the transfer starts by itself.";
+    case "ask":
+      return "mIRC is set to ASK before accepting: tell the user to accept the file in mIRC, " +
+        "or it will not start.";
+    case "ignore":
+      return "mIRC is set to IGNORE DCC sends, so this transfer cannot start.";
+    default:
+      return "mIRC's DCC accept setting is unknown.";
+  }
+}
+
 // Shared argument pieces.
 const sessionArg = z
   .string()
@@ -287,18 +337,23 @@ const waitSchema = z.object({
     .describe("Only messages addressed to us (query, notice, CTCP), not channel traffic."),
   pattern: z.string().optional().describe("Case-insensitive substring of the text."),
   since: z.int().nonnegative().optional(),
-  timeoutMs: z.int().min(100).max(600_000).optional(),
+  timeoutMs: z.int().min(100).max(MAX_WAIT_MS).optional(),
 });
-const dccStatusSchema = z.object({ session: sessionArg });
+const jobArg = z
+  .string()
+  .optional()
+  .describe("A job id from xdcc_fetch, e.g. dcc3. Omit for the most recent active one.");
+const dccStatusSchema = z.object({ session: sessionArg, job: jobArg });
 const dccWatchSchema = z.object({
   session: sessionArg,
-  timeoutMs: z.int().min(100).max(3_600_000).optional(),
+  job: jobArg,
+  timeoutMs: z.int().min(100).max(MAX_WAIT_MS).optional(),
 });
 const xdccListSchema = z.object({
   session: sessionArg,
   network: networkArg,
   bot: z.string(),
-  timeoutMs: z.int().min(500).max(120_000).optional(),
+  timeoutMs: z.int().min(500).max(MAX_WAIT_MS).optional(),
   quietMs: z
     .int()
     .min(100)
@@ -312,7 +367,12 @@ const xdccFetchSchema = z.object({
   channel: z.string(),
   bot: z.string(),
   pack: z.string().describe('Pack number or id, as the bot expects it (e.g. "42").'),
-  timeoutMs: z.int().min(500).max(600_000).optional(),
+  timeoutMs: z
+    .int()
+    .min(500)
+    .max(MAX_WAIT_MS)
+    .optional()
+    .describe("How long to wait for the bot's first answer (default 50000). The job goes on."),
   notifyOnFailure: z.boolean().optional().describe("Echo the failure into mIRC. Default true."),
 });
 const rawSchema = z.object({
@@ -886,34 +946,58 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     "irc_dcc_status",
     {
       description:
-        "DCC transfers known to the daemon: in-flight, recently completed and recently failed.",
+        "XDCC/DCC jobs: requested, queued (with position), offered, complete, refused or " +
+        "failed, with the bot's last reply. Pass `job` for one. Jobs keep updating in the " +
+        "background, so this is how to check on a slow bot.",
       inputSchema: dccStatusSchema.shape,
     },
-    ({ session }: DccStatusArgs) =>
+    ({ session, job }: DccStatusArgs) =>
       guarded(() => {
         const s = sessionOf(registry, session);
-        return json({ jobs: s.dcc.list(), active: s.dcc.active().length });
+        if (job !== undefined) {
+          const found = s.dcc.get(job);
+          if (!found) return failure(bridgeError("dcc_failed", `no DCC job named "${job}".`));
+          return json({ job: found, mircAccepts: s.sreq ?? null });
+        }
+        return json({
+          jobs: s.dcc.list(),
+          active: s.dcc.active().length,
+          mircAccepts: s.sreq ?? null,
+        });
       }),
   );
 
   tool(
     "irc_dcc_watch",
     {
-      description: "Block until a DCC transfer finishes or fails, then report the outcome.",
+      description:
+        "Wait until a DCC job changes state (queued, offered, complete, refused, failed), at most " +
+        "55 s, then report it. Call again to keep waiting: transfers and busy bots can take " +
+        "far longer than one call may wait.",
       inputSchema: dccWatchSchema.shape,
     },
-    ({ session, timeoutMs }: DccWatchArgs) =>
+    ({ session, job, timeoutMs }: DccWatchArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        const cursor = s.log.cursor;
-        const event = await waitForEvent({
-          log: s.log,
-          bus: s.bus,
-          matcher: { kind: "dcc" },
-          since: cursor,
-          timeoutMs: timeoutMs ?? 600_000,
+        const target = job !== undefined ? s.dcc.get(job) : s.dcc.active().at(-1);
+        if (!target) {
+          return job !== undefined
+            ? failure(bridgeError("dcc_failed", `no DCC job named "${job}".`))
+            : json({ changed: false, note: "no active DCC job to watch", jobs: s.dcc.list() });
+        }
+        const from = target.state;
+        const changed = await waitForJob(
+          s,
+          target,
+          (j) => j.state !== from,
+          timeoutMs ?? 50_000,
+        );
+        return json({
+          changed,
+          from,
+          job: target,
+          ...(changed ? {} : { note: "no change yet; call again to keep waiting" }),
         });
-        return json({ event: event ?? null, jobs: s.dcc.list() });
       }),
   );
 
@@ -953,8 +1037,21 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           return failure(
             bridgeError(
               "bot_no_response",
-              `${bot} did not reply with a pack list. It may be offline, idle, or not an ` +
-                "XDCC bot — check the name with irc_members.",
+              `${bot} has not replied yet. Busy bots can take minutes (one took nearly four in ` +
+                "testing); a late reply still lands in irc_read and irc_wait_for with this " +
+                `cursor: ${cursor}. It may also be offline or not an XDCC bot.`,
+            ),
+          );
+        }
+        // Many big bots refuse to list and point at a website instead.
+        const verdict = classifyBotReply(first.text ?? "");
+        if (verdict.kind === "denied") {
+          return failure(
+            bridgeError(
+              "bot_refused",
+              `${bot} does not give out its pack list (it said: "${verdict.text}"). Bots like ` +
+                "this usually publish their packs on a website or announce them in the channel.",
+              { detail: verdict.text },
             ),
           );
         }
@@ -987,15 +1084,17 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     {
       description:
         "Request a pack from an XDCC bot: ensures mIRC is on the network and in the channel, " +
-        "confirms the bot is present, sends the request, then waits for its reply. Reports " +
-        "whether a transfer started.",
+        "confirms the bot is present, sends the request, then waits (up to ~50 s) for the bot " +
+        "to answer. Returns a job: queued (with position), offered (transfer starting), " +
+        "refused (with the bot's reason), or still waiting. The job keeps updating afterwards; " +
+        "follow it with irc_dcc_watch or irc_dcc_status.",
       inputSchema: xdccFetchSchema.shape,
     },
     ({ session, network, channel, bot, pack, timeoutMs, notifyOnFailure }: XdccFetchArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
         const steps: string[] = [];
-        const waitMs = timeoutMs ?? 60_000;
+        const waitMs = timeoutMs ?? 50_000;
 
         const fail = async (error: BridgeError): Promise<ToolResult> => {
           if (notifyOnFailure !== false) {
@@ -1016,6 +1115,12 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           );
         }
         steps.push("connected");
+
+        // mIRC set to ignore DCC sends means no transfer can ever start: say so
+        // now rather than after a request the bot will dutifully queue.
+        if (s.sreq === "ignore") {
+          return await fail(bridgeError("dcc_failed", acceptance(s)));
+        }
 
         // 2. joined?
         if (!s.state.isJoined(net, channel)) {
@@ -1045,9 +1150,9 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           steps.push("bot present");
         }
 
-        // 4. capture the cursor *before* sending, so an instant reply is not missed.
-        const cursor = s.log.cursor;
-        s.dcc.start({ net: net.name, bot, pack });
+        // 4. open the job *before* sending, so an instant reply already has a job
+        //    to land on. From here the job follows the bot on its own.
+        const job = s.dcc.start({ cid: net.cid, net: net.name, bot, pack });
 
         const sent = await s.commands.send(
           "msg",
@@ -1057,33 +1162,42 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         if (!sent.ok) return await fail(sent.error);
         steps.push("requested");
 
-        // 5. wait for the bot to say something back, on this connection only.
-        const reply = await waitForEvent({
-          log: s.log,
-          bus: s.bus,
-          matcher: { cid: net.cid, nick: bot, direct: true },
-          since: cursor,
-          timeoutMs: waitMs,
-        });
+        // 5. wait, briefly, for the bot to answer or the offer to arrive.
+        await waitForJob(
+          s,
+          job,
+          (j) => j.state !== "requested" || j.lastReply !== undefined,
+          waitMs,
+        );
 
-        if (!reply) {
+        if (job.state === "refused") {
+          const verdict = classifyBotReply(job.detail ?? "");
+          const why = verdict.kind === "invalid_pack"
+            ? "there is no such pack: check the number against the bot's announcements."
+            : verdict.kind === "pending"
+            ? "a transfer or queue slot from this bot is already pending: let it finish, or " +
+              "check irc_dcc_status."
+            : verdict.kind === "busy"
+            ? "the bot is at its limit right now; try again later."
+            : "the bot declined.";
           return await fail(
-            bridgeError(
-              "bot_no_response",
-              `no reply from ${bot} within ${Math.round(waitMs / 1000)}s. It may be offline, ` +
-                "over its transfer limit, or not an XDCC bot.",
-            ),
+            bridgeError("bot_refused", `${bot} refused pack ${pack}: ${why}`, {
+              detail: job.detail,
+            }),
           );
         }
 
-        return json({
-          bot,
-          pack,
-          steps,
-          reply,
-          dcc: s.dcc.latest(),
-          note: "A DCC offer may now be pending in mIRC. Accept it there, or use irc_dcc_watch.",
-        });
+        const next = job.state === "offered"
+          ? `The transfer is starting: ${acceptance(s)} Follow it with irc_dcc_watch.`
+          : job.state === "queued"
+          ? `Queued${job.position ? ` at position ${job.position}` : ""}: the bot will send ` +
+            "when your turn comes, which can take a long time. Follow it with irc_dcc_watch."
+          : job.lastReply
+          ? "The bot answered, but not in a way the daemon recognises; see lastReply. The job " +
+            "keeps listening."
+          : `No answer from ${bot} yet. Busy bots can take minutes; the job keeps listening, ` +
+            "so check back with irc_dcc_watch rather than asking again.";
+        return json({ job, steps, mircAccepts: s.sreq ?? null, next });
       }),
   );
 
