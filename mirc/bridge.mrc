@@ -193,11 +193,7 @@ alias -l bridge_dispatch {
   ; An unparseable frame used to vanish silently; make it visible instead.
   if (%t == $null) { echo -a * bridge: unparsed frame: $1- | return }
   if (%t == ping) { bridge_send $chr(123) $+ $kvo(t, $jstr(pong)) $+ $chr(125) | return }
-  if (%t == cmd) {
-    ; Temporary instrumentation: shows whether the frame was understood.
-    echo -a * bridge: rx cmd id= $+ $jval($1-, id) $+ action= $+ $jval($1-, action)
-    bridge_command $jval($1-, id) $jval($1-, action) $1-
-  }
+  if (%t == cmd) bridge_command $jval($1-, id) $jval($1-, action) $1-
 }
 
 ; --- replies --------------------------------------------------------------
