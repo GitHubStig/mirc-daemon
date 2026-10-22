@@ -10,10 +10,11 @@ import { MAX_FRAME_BYTES } from "../src/core/types.ts";
 
 const enc = (s: string) => new TextEncoder().encode(s);
 
-Deno.test("encodeFrame terminates with a single LF", () => {
+Deno.test("encodeFrame terminates with CRLF, which is what sockread waits for", () => {
   const bytes = encodeFrame({ t: "ping" });
+  assertEquals(bytes[bytes.length - 2], 0x0d);
   assertEquals(bytes[bytes.length - 1], 0x0a);
-  assertEquals(new TextDecoder().decode(bytes), '{"t":"ping"}\n');
+  assertEquals(new TextDecoder().decode(bytes), '{"t":"ping"}\r\n');
 });
 
 Deno.test("encodeFrame refuses a frame that would exceed mIRC's line limit", () => {

@@ -38,14 +38,22 @@ export class FrameDecodeError extends Error {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-/** Serialize a frame to bytes, terminated with LF. Throws if it would not fit. */
+/**
+ * Serialize a frame to bytes, terminated with CRLF. Throws if it would not fit.
+ *
+ * CRLF, not LF: mIRC's `sockread` reads up to `$crlf`, so an LF-only line leaves
+ * the client with nothing to read — it sits on a buffer that never terminates and
+ * never fires its handler. Our own decoder accepts either, which is why a lenient
+ * test double missed this and a real mIRC did not.
+ */
 export function encodeFrame(frame: unknown, limit = MAX_FRAME_BYTES): Uint8Array {
   const json = JSON.stringify(frame);
   const body = encoder.encode(json);
   if (body.length > limit) throw new FrameTooLargeError(body.length, limit);
-  const out = new Uint8Array(body.length + 1);
+  const out = new Uint8Array(body.length + 2);
   out.set(body, 0);
-  out[body.length] = LF;
+  out[body.length] = CR;
+  out[body.length + 1] = LF;
   return out;
 }
 

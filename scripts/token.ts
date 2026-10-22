@@ -74,6 +74,8 @@ if (import.meta.main) {
 
   const token = generateToken();
   await Deno.mkdir("mirc", { recursive: true });
+  // CRLF deliberately: mIRC on Windows reads this with its own INI parser, and
+  // this file is consumed there, not by us.
   await Deno.writeTextFile(
     INI_PATH,
     [
@@ -83,7 +85,7 @@ if (import.meta.main) {
       `port=${portNumber}`,
       `token=${token}`,
       "",
-    ].join("\n"),
+    ].join("\r\n"),
   );
 
   console.log(`Wrote ${INI_PATH}`);
