@@ -18,7 +18,7 @@ Proven by running it, with evidence in the log:
   daemon's state model then holds the network, the joined channel and member counts.
 - **Daemon runs**: `deno task start` binds `127.0.0.1:8686` (mIRC, raw TCP) and `127.0.0.1:8687`
   (agents, HTTP). `/health` is unauthenticated, `/status` and `/mcp` require the bearer token.
-- **228 automated tests** (`deno task test`): MBP framing including CRLF and oversize rejection,
+- **231 automated tests** (`deno task test`): MBP framing including CRLF and oversize rejection,
   logging with redaction, the state model, the event log and waits, credit-limited command dispatch,
   the failure taxonomy, DCC outcome tracking, the listener, config, the INI reader, the HTTP door,
   the 20-tool MCP surface driven by the SDK's own client, and the frame shapes `bridge.mrc` emits
@@ -169,13 +169,16 @@ Beyond those:
   to its request. And events while the bridge link is down are dropped, because mSL does not queue
   them, by design. The daemon is not expected to restart once stable, rereading its own log could
   pick up stale entries, and mSL stays simple.
-- **A bridge reconnect starts a fresh session, and loses more than a daemon restart would suggest.**
-  Seen live: during a wait, the bridge reconnected (`s1` → `s2`, after accepting a reload prompt).
-  The pending `irc_wait_for` stayed attached to the dead session and missed the offer on the new
-  one. DCC jobs and ownership receipts live in the session too, so they are lost on any bridge
-  reconnect, not just a daemon restart. **Proposed, for review:** keep jobs and receipts per daemon
-  rather than per bridge socket, and end waits early with a clear "mIRC's link dropped; call again"
-  when their session closes.
+- **A bridge reconnect starts a fresh session, with empty notes.** DCC jobs and ownership receipts
+  live in the session, so a reconnect loses them, as a daemon restart does. A refresh restores what
+  mIRC knows (connections, channels, nicks), not what only the daemon knew (who opened what, what
+  was requested). **Decided, deliberately not built for:** reconnects should be rare once stable,
+  since reloads are a development thing. Carrying notes across a long gap could do harm: mIRC's
+  connection ids restart with mIRC, so an old receipt could match a new window of the user's. And
+  sessions are per link so that several mIRC clients can attach. Starting fresh is the safe default.
+  - **What was fixed:** a wait no longer goes deaf. Seen live: a wait stayed attached to the dead
+    session and missed an offer on the new one. Every wait now ends at once when its session's link
+    drops, with `connect_failed`: "mIRC's link to the daemon dropped during the wait… ask again".
 - **mIRC's DCC ignore list rejects some files silently.** A `.bin` offer was blocked by the user's
   ignore list (a mIRC popup). The daemon sees the offer but no transfer and no failure, so the job
   stays `offered`. Typical XDCC files (`.mkv`, `.iso`, `.zip`) are not on the default list.

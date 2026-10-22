@@ -209,17 +209,36 @@ function waitForJob(
   timeoutMs: number,
 ): Promise<boolean> {
   if (settled(job)) return Promise.resolve(true);
+  if (session.closed.aborted) return Promise.resolve(false);
   return new Promise((resolve) => {
+    const onDrop = () => stop(false);
     const stop = (result: boolean) => {
       clearTimeout(timer);
       unsubscribe();
+      session.closed.removeEventListener("abort", onDrop);
       resolve(result);
     };
     const timer = setTimeout(() => stop(false), timeoutMs);
     const unsubscribe = session.bus.on(() => {
       if (settled(job)) stop(true);
     });
+    session.closed.addEventListener("abort", onDrop, { once: true });
   });
+}
+
+/**
+ * The answer when a wait's mIRC link dropped under it. Events after a
+ * reconnect go to a new session, so the wait could only have missed them;
+ * the agent should ask again, which reaches the new session.
+ */
+function linkDropped(): ToolResult {
+  return failure(
+    bridgeError(
+      "connect_failed",
+      "mIRC's link to the daemon dropped during the wait, so anything that arrived since " +
+        "was not seen here. Ask again; once mIRC has reconnected, the call reaches it.",
+    ),
+  );
 }
 
 /** What mIRC will do with an offer, from its DCC send-request setting ($sreq). */
@@ -1010,10 +1029,12 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         const event = await waitForEvent({
           log: s.log,
           bus: s.bus,
+          signal: s.closed,
           matcher,
           since: cursor,
           timeoutMs: waitMs,
         });
+        if (!event && s.closed.aborted) return linkDropped();
         if (!event) return json({ matched: false, waitedMs: waitMs, cursor: s.log.cursor });
         return json({ matched: true, event, cursor: s.log.cursor });
       }),
@@ -1075,6 +1096,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           (j) => j.state !== from,
           timeoutMs ?? 50_000,
         );
+        if (!changed && s.closed.aborted) return linkDropped();
         return json({
           changed,
           from,
@@ -1178,10 +1200,12 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         const first = await waitForEvent({
           log: s.log,
           bus: s.bus,
+          signal: s.closed,
           matcher,
           since: cursor,
           timeoutMs: Math.max(0, deadline - Date.now()),
         });
+        if (!first && s.closed.aborted) return linkDropped();
         if (!first) {
           return failure(
             bridgeError(
@@ -1217,10 +1241,12 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           const next = await waitForEvent({
             log: s.log,
             bus: s.bus,
+            signal: s.closed,
             matcher,
             since: replies[replies.length - 1].seq,
             timeoutMs: Math.min(quietMs ?? 3000, remaining),
           });
+          if (!next && s.closed.aborted) return linkDropped();
           if (!next) break;
           replies.push(next);
         }
@@ -1318,6 +1344,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           (j) => j.state !== "requested" || j.lastReply !== undefined,
           waitMs,
         );
+        if (s.closed.aborted) return linkDropped();
 
         if (job.state === "refused") {
           const verdict = classifyBotReply(job.detail ?? "");

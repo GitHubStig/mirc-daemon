@@ -57,6 +57,7 @@ export class Session {
   mirc?: string;
   /** mIRC's DCC send-request setting ($sreq) as of the last refresh, if reported. */
   sreq?: string;
+  #closed = new AbortController();
 
   constructor(options: SessionOptions) {
     this.id = options.id;
@@ -151,8 +152,18 @@ export class Session {
     };
   }
 
+  /**
+   * Aborted when this session's mIRC link drops. Waits listen for it, so an
+   * agent waiting on a reply hears "the link dropped" rather than silence:
+   * after a reconnect, events go to a new session this wait knows nothing of.
+   */
+  get closed(): AbortSignal {
+    return this.#closed.signal;
+  }
+
   close(reason: string): void {
     this.commands.close(reason);
+    this.#closed.abort(reason);
   }
 }
 

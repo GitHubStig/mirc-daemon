@@ -85,6 +85,12 @@ export interface WaitOptions {
   /** Cursor to start from. Omit for "from now", ignoring backlog. */
   since?: number;
   timeoutMs?: number;
+  /**
+   * Ends the wait early, unmatched. A session aborts it when its mIRC link
+   * drops: the wait's log and bus belong to that session, so after a
+   * reconnect it would otherwise sit on a dead stream and miss everything.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -101,14 +107,19 @@ export function waitForEvent(options: WaitOptions): Promise<BridgeEvent | undefi
   const backlog = log.findFirst(cursor, (event) => matchesWait(event, matcher));
   if (backlog) return Promise.resolve(backlog);
 
+  if (options.signal?.aborted) return Promise.resolve(undefined);
+
   return new Promise<BridgeEvent | undefined>((resolve) => {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const onAbort = () => finish(undefined);
 
     const finish = (event?: BridgeEvent) => {
       unsubscribe();
       if (timer !== undefined) clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
       resolve(event);
     };
+    options.signal?.addEventListener("abort", onAbort, { once: true });
 
     // Declared after `finish` because `finish` closes over it; subscribing is
     // synchronous and never invokes the handler, so the ordering is safe.

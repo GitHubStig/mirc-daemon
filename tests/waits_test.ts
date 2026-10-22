@@ -173,3 +173,22 @@ Deno.test("a wait's network matches regardless of case", () => {
   assertEquals(matchesWait(event, { net: "EFNet" }), true);
   assertEquals(matchesWait(event, { net: "Rizon" }), false);
 });
+
+Deno.test("a wait ends at once, unmatched, when its signal aborts", async () => {
+  const { log, bus } = harness();
+  const dropped = new AbortController();
+  const started = Date.now();
+  const pending = waitForEvent({
+    log,
+    bus,
+    matcher: { nick: "bot" },
+    timeoutMs: 10_000,
+    signal: dropped.signal,
+  });
+  dropped.abort("link dropped");
+  assertEquals(await pending, undefined);
+  assertEquals(Date.now() - started < 1000, true);
+  // An already-aborted signal does not even subscribe.
+  assertEquals(bus.subscriberCount, 0);
+  assertEquals(await waitForEvent({ log, bus, matcher: {}, signal: dropped.signal }), undefined);
+});

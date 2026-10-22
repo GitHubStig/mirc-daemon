@@ -1328,3 +1328,39 @@ Deno.test("irc_part carries a part message when given, and none otherwise", asyn
     await s.stop();
   }
 });
+
+Deno.test("a wait whose mIRC link drops says so at once instead of going deaf", async () => {
+  const s = await stack();
+  try {
+    const started = Date.now();
+    const waiting = s.client.callTool({
+      name: "irc_wait_for",
+      arguments: { nick: "Bot", timeoutMs: 20_000 },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    // mIRC's script disconnects, e.g. mIRC restarting.
+    await s.fake.close();
+    const text = textOf(await waiting);
+    assertEquals(text.startsWith("connect_failed:"), true);
+    assertEquals(text.includes("link to the daemon dropped"), true);
+    assertEquals(Date.now() - started < 5000, true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("irc_dcc_watch also reports a dropped link rather than 'no change'", async () => {
+  const s = await stack();
+  try {
+    const job = s.mirc.registry.resolve()!.dcc.start({ cid: 1, net: "net1", bot: "Bot" });
+    const watching = s.client.callTool({
+      name: "irc_dcc_watch",
+      arguments: { job: job.id, timeoutMs: 20_000 },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await s.fake.close();
+    assertEquals(textOf(await watching).startsWith("connect_failed:"), true);
+  } finally {
+    await s.stop();
+  }
+});
