@@ -70,6 +70,10 @@ export class Session {
    */
   record(input: NewEvent): BridgeEvent {
     const event = this.log.append(input);
+    // The hello nick goes stale the first time services or a collision rename us.
+    if (event.kind === "selfnick" && typeof event.extra?.new === "string" && event.extra.new) {
+      this.nick = event.extra.new;
+    }
     this.state.applyEvent(event);
     this.dcc.applyEvent(event);
     this.bus.emit(event);

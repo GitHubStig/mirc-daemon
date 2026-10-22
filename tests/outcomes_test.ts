@@ -144,3 +144,25 @@ Deno.test("networkUsable reflects whether commands can actually be sent", () => 
   assertEquals(networkUsable({ ...base, status: "connecting" }), false);
   assertEquals(networkUsable({ ...base, status: "disconnected" }), false);
 });
+
+Deno.test("numeric 0 from bridge.mrc means no numeric, not a refusal numbered 0", () => {
+  const outcome = normalizeRes(res({ ok: false, numeric: 0, err: "missing-target" }), "message");
+  assertEquals(outcome.ok, false);
+  if (!outcome.ok) {
+    assertEquals(outcome.error.numeric, undefined);
+    assertEquals(outcome.error.hint.includes("numeric 0"), false);
+  }
+});
+
+Deno.test("the err tokens bridge.mrc sends map to their own codes", () => {
+  const cases: Array<[string, string]> = [
+    ["not-on-channel", "not_on_channel"],
+    ["join-timeout", "join_timeout"],
+    ["ison-timeout", "timeout"],
+    ["connection-failed", "connect_failed"],
+  ];
+  for (const [err, code] of cases) {
+    const outcome = normalizeRes(res({ ok: false, numeric: 0, err }), "join");
+    assertEquals(outcome.ok ? undefined : outcome.error.code, code, err);
+  }
+});

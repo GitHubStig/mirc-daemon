@@ -91,3 +91,10 @@ Deno.test("a capacity below one is rejected rather than silently useless", () =>
   }
   assertEquals(threw, true);
 });
+
+Deno.test("keep: oldest pages forward instead of skipping to the newest", () => {
+  const log = new EventLog();
+  for (let i = 1; i <= 5; i++) log.append(at({ kind: "text", net: "net1", text: `m${i}` }));
+  assertEquals(log.since(1, { limit: 2, keep: "oldest" }).map((e) => e.text), ["m2", "m3"]);
+  assertEquals(log.since(1, { limit: 2 }).map((e) => e.text), ["m4", "m5"]);
+});

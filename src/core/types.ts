@@ -119,21 +119,29 @@ export interface PongFrame {
  * Kinds of IRC activity the daemon mirrors. `nick` is somebody else renaming;
  * `selfnick` is *us* being renamed by the server or services (§8).
  */
-export type EventKind =
-  | "raw"
-  | "text"
-  | "notice"
-  | "ctcp"
-  | "nick"
-  | "selfnick"
-  | "join"
-  | "part"
-  | "quit"
-  | "kick"
-  | "topic"
-  | "conn"
-  | "error"
-  | "dcc";
+export const EVENT_KINDS = [
+  "raw",
+  "text",
+  "notice",
+  "ctcp",
+  "nick",
+  "selfnick",
+  "join",
+  "part",
+  "quit",
+  "kick",
+  "topic",
+  "conn",
+  "error",
+  "dcc",
+] as const;
+
+/**
+ * Held as a runtime list as well as a type, so the tool layer can reject a
+ * misspelt kind outright. A free-form string that matches nothing turns a typo
+ * into a wait that silently runs to its timeout.
+ */
+export type EventKind = typeof EVENT_KINDS[number];
 
 export interface EventFrame {
   t: "ev";
@@ -143,6 +151,8 @@ export interface EventFrame {
   nick?: string;
   user?: string;
   text?: string;
+  /** The whole server line, for `kind === "raw"`. */
+  raw?: string;
   /** kind-specific payload: nick change, conn state, dcc outcome, etc. */
   extra?: Record<string, unknown>;
 }

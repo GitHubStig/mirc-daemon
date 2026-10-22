@@ -222,7 +222,8 @@ export function createLogger(options: LoggerOptions = {}): LogSink {
       info: (kind, data) => at("info", kind, data),
       warn: (kind, data) => at("warn", kind, data),
       error: (kind, data) => at("error", kind, data),
-      child: (b) => makeSink(b),
+      // Extend this sink's bindings, not the root's, so a grandchild keeps them.
+      child: (b) => makeSink({ ...bound, ...b }),
       close: async () => {
         await queue;
         if (file) {

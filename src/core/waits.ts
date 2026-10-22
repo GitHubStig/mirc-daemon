@@ -28,10 +28,24 @@ export interface WaitMatcher {
   nick?: string;
   /** Case-insensitive substring match across the event's text and raw line. */
   pattern?: string;
+  /**
+   * Only events addressed to us — a query, a notice or a CTCP — not channel
+   * traffic. An XDCC bot advertises in its channel constantly, so waiting on
+   * "anything from the bot" would take an advert for the reply.
+   */
+  direct?: boolean;
+}
+
+/** IRC channel prefixes; anything else in `buf` is a query nick. */
+const CHANNEL_PREFIXES = "#&+!";
+
+export function isChannelBuffer(buf: string | undefined): boolean {
+  return buf !== undefined && buf.length > 0 && CHANNEL_PREFIXES.includes(buf[0]);
 }
 
 export function matchesWait(event: BridgeEvent, matcher: WaitMatcher): boolean {
   if (matcher.kind !== undefined && event.kind !== matcher.kind) return false;
+  if (matcher.direct && isChannelBuffer(event.buf)) return false;
   if (matcher.net !== undefined && event.net !== matcher.net) return false;
   if (matcher.buf !== undefined && !sameIgnoreCase(event.buf, matcher.buf)) return false;
   if (matcher.nick !== undefined && !sameIgnoreCase(event.nick, matcher.nick)) return false;

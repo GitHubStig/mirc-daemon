@@ -154,3 +154,15 @@ Deno.test("a wait ignores events at or before its cursor", async () => {
   });
   assertEquals(result, undefined);
 });
+
+Deno.test("a direct matcher ignores the bot's channel adverts and takes its notice", () => {
+  const { record } = harness();
+  const advert = record({ kind: "text", net: "n", buf: "#xdcc", nick: "Bot", text: "pack 1" });
+  const notice = record({ kind: "notice", net: "n", buf: "Bot", nick: "Bot", text: "sending" });
+  const ctcp = record({ kind: "ctcp", net: "n", nick: "Bot", extra: { ctcp: "DCC" } });
+  const matcher = { nick: "bot", direct: true };
+  assertEquals(matchesWait(advert, matcher), false);
+  assertEquals(matchesWait(notice, matcher), true);
+  // A CTCP carries no buffer at all, and is still addressed to us.
+  assertEquals(matchesWait(ctcp, matcher), true);
+});

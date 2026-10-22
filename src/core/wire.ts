@@ -139,11 +139,30 @@ export class LineDecoder {
   }
 }
 
+/**
+ * Escape raw C0 control characters other than tab, LF and CR.
+ *
+ * IRC formatting is made of them (\x02 bold, \x03 colour, \x0f reset, \x1f
+ * underline), JSON forbids them unescaped inside strings, and a bridge.mrc that
+ * forgets to escape them makes every coloured line unparseable — which is how
+ * XDCC bot replies went missing. They are never legal outside a string either,
+ * so escaping them everywhere cannot change a valid frame's meaning.
+ */
+export function escapeControlChars(line: string): string {
+  return line.replace(
+    RAW_CONTROL_RE,
+    (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"),
+  );
+}
+
+// deno-lint-ignore no-control-regex -- matching control characters is the point
+const RAW_CONTROL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f]/g;
+
 /** Parse and type-check a single inbound frame. Throws FrameDecodeError on garbage. */
 export function parseInbound(line: string): unknown {
   let value: unknown;
   try {
-    value = JSON.parse(line);
+    value = JSON.parse(escapeControlChars(line));
   } catch (err) {
     throw new FrameDecodeError(`invalid JSON: ${(err as Error).message}`);
   }

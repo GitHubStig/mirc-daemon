@@ -356,3 +356,133 @@ Deno.test("the daemon survives an agent disconnecting and reconnecting", async (
     await s.stop();
   }
 });
+
+Deno.test("irc_read pages forward from a cursor without skipping anything", async () => {
+  const s = await stack();
+  try {
+    const session = s.mirc.registry.resolve()!;
+    const start = session.log.cursor;
+    for (let i = 1; i <= 5; i++) s.fake.emit("text", { buf: "#chan", nick: "x", text: `m${i}` });
+    await until(() => session.log.cursor >= start + 5, { label: "five events" });
+
+    const seen: string[] = [];
+    let cursor = start;
+    for (;;) {
+      const result = await s.client.callTool({
+        name: "irc_read",
+        arguments: { since: cursor, limit: 2 },
+      });
+      const body = JSON.parse(textOf(result));
+      seen.push(...body.events.map((e: { text: string }) => e.text));
+      cursor = body.cursor;
+      if (!body.more) break;
+    }
+    assertEquals(seen, ["m1", "m2", "m3", "m4", "m5"]);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("a misspelt event kind is refused instead of waiting out its timeout", async () => {
+  const s = await stack();
+  try {
+    const startedTs = Date.now();
+    const result = await s.client.callTool({
+      name: "irc_wait_for",
+      arguments: { kind: "msg", timeoutMs: 5000 },
+    });
+    assertEquals(result.isError, true);
+    assertEquals(Date.now() - startedTs < 2000, true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("xdcc_list collects the whole burst and skips the bot's channel adverts", async () => {
+  const s = await stack();
+  try {
+    s.fake.setHandler((cmd, fake) => {
+      if (cmd.action === "msg") {
+        // An advert in the channel first, then the reply proper, spread over time.
+        setTimeout(() => fake.emit("text", { buf: "#chan", nick: "Bot", text: "advert" }), 10);
+        setTimeout(() => fake.emit("notice", { buf: "Bot", nick: "Bot", text: "line 1" }), 30);
+        setTimeout(() => fake.emit("notice", { buf: "Bot", nick: "Bot", text: "line 2" }), 150);
+        setTimeout(() => fake.emit("notice", { buf: "Bot", nick: "Bot", text: "line 3" }), 300);
+      }
+      return undefined;
+    });
+    const result = await s.client.callTool({
+      name: "xdcc_list",
+      arguments: { bot: "Bot", timeoutMs: 5000, quietMs: 400 },
+    });
+    const body = JSON.parse(textOf(result));
+    assertEquals(body.replies.map((e: { text: string }) => e.text), ["line 1", "line 2", "line 3"]);
+    assertEquals(body.complete, true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("xdcc_fetch asks about the one bot, and an advert is not taken for its reply", async () => {
+  const s = await stack();
+  try {
+    s.fake.setHandler((cmd, fake) => {
+      if (cmd.action === "members") return { ok: true, data: { count: 4000, present: true } };
+      if (cmd.action === "msg") {
+        setTimeout(() => fake.emit("text", { buf: "#chan", nick: "Bot", text: "advert" }), 10);
+        setTimeout(() => fake.emit("notice", { buf: "Bot", nick: "Bot", text: "Sending" }), 60);
+      }
+      return undefined;
+    });
+    const result = await s.client.callTool({
+      name: "xdcc_fetch",
+      arguments: { channel: "#chan", bot: "Bot", pack: "42", timeoutMs: 3000 },
+    });
+    const body = JSON.parse(textOf(result));
+    assertEquals(body.reply.text, "Sending");
+
+    const members = s.fake.received.find((c) => c.action === "members");
+    assertEquals(members?.params?.nick, "Bot");
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("xdcc_fetch stops early when mIRC says the bot is absent", async () => {
+  const s = await stack();
+  try {
+    s.fake.setHandler((cmd) =>
+      cmd.action === "members" ? { ok: true, data: { count: 10, present: false } } : undefined
+    );
+    const result = await s.client.callTool({
+      name: "xdcc_fetch",
+      arguments: { channel: "#chan", bot: "Gone", pack: "1", notifyOnFailure: false },
+    });
+    assertEquals(textOf(result).startsWith("bot_not_in_channel:"), true);
+    assertEquals(s.fake.received.some((c) => c.action === "msg"), false);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("irc_ison sends nicks as one string, so bracketed nicks survive mSL", async () => {
+  const s = await stack();
+  try {
+    s.fake.setHandler((cmd) =>
+      cmd.action === "ison" ? { ok: true, data: { present: ["[XDCC]Bot"] } } : undefined
+    );
+    const result = await s.client.callTool({
+      name: "irc_ison",
+      arguments: { nicks: ["[XDCC]Bot", "absent"] },
+    });
+    const body = JSON.parse(textOf(result));
+    assertEquals(body.present, ["[XDCC]Bot"]);
+    assertEquals(body.absent, ["absent"]);
+    assertEquals(
+      s.fake.received.find((c) => c.action === "ison")?.params?.list,
+      "[XDCC]Bot absent",
+    );
+  } finally {
+    await s.stop();
+  }
+});

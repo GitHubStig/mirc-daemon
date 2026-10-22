@@ -18,9 +18,10 @@ import { z } from "zod";
 import {
   type BridgeError,
   bridgeError,
+  type BridgeEvent,
   BridgeFailure,
   type DaemonStatus,
-  type EventKind,
+  EVENT_KINDS,
 } from "../core/types.ts";
 import type { Session, SessionRegistry } from "../core/sessions.ts";
 import { emptyChannelWarning } from "../core/outcomes.ts";
@@ -134,9 +135,18 @@ const readSchema = z.object({
   session: sessionArg,
   network: networkArg,
   buffer: z.string().optional().describe("Channel or query nick."),
-  since: z.int().nonnegative().optional().describe("Cursor from a previous read."),
-  limit: z.int().positive().max(500).optional().describe("Newest N matches (default 50)."),
-  kinds: z.array(z.string()).optional().describe('Event kinds, e.g. ["text","notice"].'),
+  since: z
+    .int()
+    .nonnegative()
+    .optional()
+    .describe("Cursor from a previous read. With it, pages forward oldest first."),
+  limit: z
+    .int()
+    .positive()
+    .max(500)
+    .optional()
+    .describe("At most N matches (default 50): the newest N when `since` is omitted."),
+  kinds: z.array(z.enum(EVENT_KINDS)).optional().describe('Event kinds, e.g. ["text","notice"].'),
 });
 const membersSchema = z.object({
   session: sessionArg,
@@ -182,9 +192,13 @@ const notifySchema = z.object({ session: sessionArg, text: z.string().min(1) });
 const waitSchema = z.object({
   session: sessionArg,
   network: networkArg,
-  kind: z.string().optional().describe("Event kind: text, notice, dcc, selfnick, ..."),
+  kind: z.enum(EVENT_KINDS).optional().describe("Event kind: text, notice, dcc, selfnick, ..."),
   buffer: z.string().optional(),
   nick: z.string().optional().describe("Who the message must be from."),
+  direct: z
+    .boolean()
+    .optional()
+    .describe("Only messages addressed to us (query, notice, CTCP), not channel traffic."),
   pattern: z.string().optional().describe("Case-insensitive substring of the text."),
   since: z.int().nonnegative().optional(),
   timeoutMs: z.int().min(100).max(600_000).optional(),
@@ -199,6 +213,12 @@ const xdccListSchema = z.object({
   network: networkArg,
   bot: z.string(),
   timeoutMs: z.int().min(500).max(120_000).optional(),
+  quietMs: z
+    .int()
+    .min(100)
+    .max(30_000)
+    .optional()
+    .describe("The list is complete once the bot is silent this long (default 3000)."),
 });
 const xdccFetchSchema = z.object({
   session: sessionArg,
@@ -364,20 +384,27 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     ({ session, network, buffer, since, limit, kinds }: ReadArgs) =>
       guarded(() => {
         const s = sessionOf(registry, session);
-        const events = s.log.since(since ?? 0, {
-          net: network,
-          buf: buffer,
-          limit: limit ?? 50,
-          kinds: kinds as EventKind[] | undefined,
-        });
-        return json({ cursor: s.log.cursor, events });
+        const max = limit ?? 50;
+        const query = { net: network, buf: buffer, kinds };
+        if (since === undefined) {
+          const events = s.log.since(0, { ...query, limit: max });
+          return json({ cursor: s.log.cursor, events, more: false });
+        }
+        // Paging: keep the oldest so nothing between two polls is skipped, and hand
+        // back a cursor at the last event returned rather than at the head.
+        const page = s.log.since(since, { ...query, limit: max + 1, keep: "oldest" });
+        const more = page.length > max;
+        const events = page.slice(0, max);
+        const cursor = more ? events[events.length - 1].seq : s.log.cursor;
+        return json({ cursor, events, more });
       }),
   );
 
   tool(
     "irc_members",
     {
-      description: "Who is in a channel. Use it to confirm a bot is present before messaging it.",
+      description:
+        "Who is in a channel. Large channels return a truncated name list with the full count.",
       inputSchema: membersSchema.shape,
     },
     ({ session, network, channel }: MembersArgs) =>
@@ -391,7 +418,8 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           channel,
           count: typeof outcome.data?.count === "number" ? outcome.data.count : names.length,
           names: names.slice(0, 200),
-          truncated: names.length > 200,
+          // mIRC stops listing before a frame would overflow the line limit.
+          truncated: names.length > 200 || outcome.data?.truncated === true,
         });
       }),
   );
@@ -406,7 +434,9 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
       guarded(async () => {
         const s = sessionOf(registry, session);
         s.state.resolve(network);
-        const outcome = await s.commands.send("ison", { nicks });
+        // A space-separated string, not an array: mSL found arrays by bracket
+        // position, and nicks like [XDCC]Bot contain brackets.
+        const outcome = await s.commands.send("ison", { list: nicks.join(" ") });
         if (!outcome.ok) return failure(outcome.error);
         const present = Array.isArray(outcome.data?.present)
           ? (outcome.data!.present as string[])
@@ -559,7 +589,8 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     {
       description:
         "Send a PRIVMSG. `target` may be a channel (#name) or a nick, so this covers both " +
-        "talking in a channel and messaging a bot.",
+        "talking in a channel and messaging a bot. Success means mIRC sent it; IRC does not " +
+        "acknowledge delivery, so a refusal (e.g. 401 no such nick) arrives later as a raw event.",
       inputSchema: sendSchema.shape,
     },
     ({ session, network, target, text }: SendArgs) =>
@@ -610,16 +641,10 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         "arrived, which avoids missing a reply that landed just before the call.",
       inputSchema: waitSchema.shape,
     },
-    ({ session, network, kind, buffer, nick, pattern, since, timeoutMs }: WaitArgs) =>
+    ({ session, network, kind, buffer, nick, pattern, direct, since, timeoutMs }: WaitArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        const matcher: WaitMatcher = {
-          kind: kind as EventKind | undefined,
-          net: network,
-          buf: buffer,
-          nick,
-          pattern,
-        };
+        const matcher: WaitMatcher = { kind, net: network, buf: buffer, nick, pattern, direct };
         const cursor = since ?? s.log.cursor;
         const waitMs = timeoutMs ?? 30_000;
         const event = await waitForEvent({
@@ -681,22 +706,24 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         "as several messages and may be truncated by the bot.",
       inputSchema: xdccListSchema.shape,
     },
-    ({ session, network, bot, timeoutMs }: XdccListArgs) =>
+    ({ session, network, bot, timeoutMs, quietMs }: XdccListArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
         s.state.resolve(network);
         const cursor = s.log.cursor;
+        const deadline = Date.now() + (timeoutMs ?? 20_000);
         const sent = await s.commands.send("msg", { target: bot, text: "xdcc list" }, {
           context: "message",
         });
         if (!sent.ok) return failure(sent.error);
 
+        const matcher: WaitMatcher = { nick: bot, direct: true };
         const first = await waitForEvent({
           log: s.log,
           bus: s.bus,
-          matcher: { nick: bot },
+          matcher,
           since: cursor,
-          timeoutMs: timeoutMs ?? 20_000,
+          timeoutMs: Math.max(0, deadline - Date.now()),
         });
         if (!first) {
           return failure(
@@ -707,11 +734,27 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
             ),
           );
         }
-        // Pack lists arrive as a burst, so take everything the bot sent after the ask.
-        const replies = s.log
-          .since(cursor)
-          .filter((e) => (e.nick ?? "").toLowerCase() === bot.toLowerCase());
-        return json({ bot, replies, cursor: s.log.cursor });
+        // Pack lists arrive as a burst spread over seconds (bots throttle themselves),
+        // so keep collecting until the bot goes quiet rather than stopping at line one.
+        const replies: BridgeEvent[] = [first];
+        let complete = true;
+        for (;;) {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) {
+            complete = false;
+            break;
+          }
+          const next = await waitForEvent({
+            log: s.log,
+            bus: s.bus,
+            matcher,
+            since: replies[replies.length - 1].seq,
+            timeoutMs: Math.min(quietMs ?? 3000, remaining),
+          });
+          if (!next) break;
+          replies.push(next);
+        }
+        return json({ bot, replies, complete, cursor: s.log.cursor });
       }),
   );
 
@@ -761,10 +804,11 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         }
 
         // 3. is the bot actually here? Failing now beats waiting for a timeout.
-        const members = await s.commands.send("members", { channel });
-        if (members.ok && Array.isArray(members.data?.names)) {
-          const names = members.data!.names as string[];
-          if (!names.some((n) => n.toLowerCase() === bot.toLowerCase())) {
+        // Ask about the one nick rather than fetching the list: XDCC channels run to
+        // thousands of users, far past what one frame can carry.
+        const members = await s.commands.send("members", { channel, nick: bot });
+        if (members.ok && typeof members.data?.present === "boolean") {
+          if (!members.data.present) {
             return await fail(
               bridgeError(
                 "bot_not_in_channel",
@@ -791,7 +835,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         const reply = await waitForEvent({
           log: s.log,
           bus: s.bus,
-          matcher: { nick: bot },
+          matcher: { nick: bot, direct: true },
           since: cursor,
           timeoutMs: waitMs,
         });

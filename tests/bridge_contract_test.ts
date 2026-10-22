@@ -37,7 +37,16 @@ class RawMirc {
   }
 
   send(frame: unknown): void {
-    void this.#conn.write(new TextEncoder().encode(JSON.stringify(frame) + "\n"));
+    this.sendLine(JSON.stringify(frame));
+  }
+
+  /**
+   * Send a line exactly as given. `send` goes through JSON.stringify, which can
+   * never produce the malformed JSON a hand-built mSL frame can — so on its own
+   * it hid the escaping bugs this file exists to catch.
+   */
+  sendLine(line: string): void {
+    void this.#conn.write(new TextEncoder().encode(line + "\r\n"));
   }
 
   /** Next frame from the daemon, or undefined if none arrives in time. */
@@ -246,6 +255,9 @@ Deno.test("the event shapes bridge.mrc emits land in the right places", async ()
     await until(() => session.log.snapshot().some((e) => e.kind === "raw"), {
       label: "raw event",
     });
+    // The line itself must survive, not just the fact that one arrived.
+    const raw = session.log.snapshot().find((e) => e.kind === "raw");
+    assertEquals(raw?.raw, ":server 401 me nobody :No such nick");
   } finally {
     await h.stop();
   }
@@ -277,5 +289,121 @@ Deno.test("DCC outcome shapes close a job as complete or failed", async () => {
     assertEquals(session.dcc.recentFailures().length, 1);
   } finally {
     await h.stop();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// String escaping, both directions.
+//
+// These are TypeScript ports of jstr, jval and junesc in bridge.mrc, kept
+// step-for-step so a change to one has an obvious twin in the other. A port
+// cannot prove mSL behaves the same, but it does pin down what the algorithm is
+// supposed to do, and it feeds the daemon the bytes mIRC would actually send.
+// ---------------------------------------------------------------------------
+
+/** bridge.mrc `jstr`: escape and quote. */
+function mslJstr(input: string, { escapeControls = true } = {}): string {
+  let s = input
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"')
+    .replaceAll("\n", "\\n")
+    .replaceAll("\r", "\\r")
+    .replaceAll("\t", "\\t");
+  if (escapeControls) {
+    for (let i = 1; i < 32; i++) {
+      // $base(%i, 10, 16, 2) is upper-case hex, which JSON accepts.
+      const hex = i.toString(16).toUpperCase().padStart(2, "0");
+      s = s.replaceAll(String.fromCharCode(i), "\\u00" + hex);
+    }
+  }
+  return `"${s}"`;
+}
+
+/** bridge.mrc `junesc_one`. */
+function mslUnescapeOne(c: string): string {
+  if (c === "n" || c === "r") return " ";
+  if (c === "t") return "\t";
+  if (c === "b" || c === "f") return "";
+  if (c.length === 5) {
+    const n = parseInt(c.slice(1), 16);
+    if (n === 0) return "";
+    if (n === 10 || n === 13) return " ";
+    return String.fromCharCode(n);
+  }
+  return c;
+}
+
+/** bridge.mrc `jval` + `junesc`. */
+function mslJval(frame: string, key: string): string | undefined {
+  const match = new RegExp(`"${key}":"((?:[^"\\\\]|\\\\.)*)"`).exec(frame);
+  if (!match) return undefined;
+  return match[1].replace(/\\(["\\/bfnrt]|u[0-9a-fA-F]{4})/g, (_m, c: string) => mslUnescapeOne(c));
+}
+
+const COLOURED = "\x02** 3 packs **\x02 \x0304#1\x03 \x1fpack.mkv\x1f\x0f";
+
+Deno.test("coloured IRC text, escaped as bridge.mrc escapes it, arrives intact", async () => {
+  const h = await attach();
+  try {
+    const session = h.session()!;
+    h.mirc.sendLine(
+      `{"t":"ev","kind":"notice","net":"net1","buf":"XDCC-Bot","nick":"XDCC-Bot","text":${
+        mslJstr(COLOURED)
+      }}`,
+    );
+    await until(() => session.log.size >= 1, { label: "notice event" });
+    assertEquals(session.log.snapshot()[0].text, COLOURED);
+  } finally {
+    await h.stop();
+  }
+});
+
+Deno.test("a frame with raw control characters, as an older bridge.mrc sent, still parses", async () => {
+  // Users copy bridge.mrc into mIRC by hand, so an old copy can outlive the fix.
+  const h = await attach();
+  try {
+    const session = h.session()!;
+    h.mirc.sendLine(
+      `{"t":"ev","kind":"text","net":"net1","buf":"#chan","nick":"bot","text":${
+        mslJstr(COLOURED, { escapeControls: false })
+      }}`,
+    );
+    await until(() => session.log.size >= 1, { label: "text event" });
+    assertEquals(session.log.snapshot()[0].text, COLOURED);
+  } finally {
+    await h.stop();
+  }
+});
+
+Deno.test("jval recovers what the daemon sends, quotes and backslashes included", () => {
+  const cases: Array<[string, string]> = [
+    ['say "hi"', 'say "hi"'],
+    ["C:\\dir\\new", "C:\\dir\\new"],
+    ["ends in a backslash \\", "ends in a backslash \\"],
+    ["\\n is not a newline", "\\n is not a newline"],
+    ["tab\there", "tab\there"],
+    ["\x02bold\x02 and \x0304colour", "\x02bold\x02 and \x0304colour"],
+    ["ünïcode ✓", "ünïcode ✓"],
+    // A real line break must not reach IRC as one: it would start a new command.
+    ["line1\nline2\r\nQUIT", "line1 line2  QUIT"],
+    // Text that looks like another key must not be mistaken for it.
+    ['x","target":"#evil', 'x","target":"#evil'],
+  ];
+  for (const [text, expected] of cases) {
+    // encodeFrame is JSON.stringify plus CRLF; this is the line mIRC reads.
+    const line = JSON.stringify({
+      t: "cmd",
+      id: "c1",
+      action: "msg",
+      params: { target: "#x", text },
+    });
+    assertEquals(mslJval(line, "text"), expected, `text: ${JSON.stringify(text)}`);
+    assertEquals(mslJval(line, "target"), "#x", `target beside: ${JSON.stringify(text)}`);
+  }
+});
+
+Deno.test("jstr output is valid JSON that decodes to the original", () => {
+  for (const text of [COLOURED, 'q"uote', "back\\slash", "a\tb", "\x01ACTION waves\x01"]) {
+    assertEquals(JSON.parse(mslJstr(text)), text);
   }
 });

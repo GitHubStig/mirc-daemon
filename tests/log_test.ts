@@ -105,3 +105,22 @@ Deno.test("logging with dir: null is a no-op that never throws", async () => {
   log.debug("anything", { a: 1 });
   await log.close();
 });
+
+Deno.test("a grandchild logger keeps every ancestor's bindings", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const log = createLogger({ dir, mirrorToConsole: false });
+    // The shape main.ts and connection.ts build: door, then remote, then session.
+    log.child({ door: "mirc" }).child({ remote: "127.0.0.1:5000" }).child({ session: "s1" })
+      .info("probe");
+    await log.close();
+
+    const file = [...Deno.readDirSync(dir)].map((e) => `${dir}/${e.name}`)[0];
+    const record = JSON.parse((await Deno.readTextFile(file)).trim());
+    assertEquals(record.door, "mirc");
+    assertEquals(record.remote, "127.0.0.1:5000");
+    assertEquals(record.session, "s1");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});

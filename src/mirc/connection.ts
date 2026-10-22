@@ -192,6 +192,7 @@ export async function handleMircConnection(
       nick: frame.nick,
       user: frame.user,
       text: frame.text,
+      raw: frame.raw,
       extra: frame.extra,
     });
   };

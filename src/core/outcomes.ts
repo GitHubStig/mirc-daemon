@@ -111,6 +111,27 @@ export function classifyNumeric(
 }
 
 /**
+ * Failure tokens bridge.mrc sends in `err` when no numeric is involved. mSL has
+ * no cheap way to emit a `code` field, so the mapping lives here instead.
+ */
+const ERR_TOKENS: Record<string, { code: ErrorCode; hint: string }> = {
+  "not-on-channel": {
+    code: "not_on_channel",
+    hint: "mIRC is not in that channel. Join it first, or use irc_ensure_joined.",
+  },
+  "join-timeout": {
+    code: "join_timeout",
+    hint: "the server never confirmed the join. The channel may forward elsewhere, or the " +
+      "server sent a refusal mIRC does not recognise; check irc_read for a raw numeric.",
+  },
+  "ison-timeout": { code: "timeout", hint: "the server did not answer the ISON query." },
+  "connection-failed": {
+    code: "connect_failed",
+    hint: "mIRC lost or could not establish the connection to that server.",
+  },
+};
+
+/**
  * Interpret mIRC's reply to one command. mIRC reports the outcome it observed,
  * so for `join` this already reflects the join echo or the error numeric.
  */
@@ -122,7 +143,8 @@ export function normalizeRes(
     return frame.data === undefined ? { ok: true } : { ok: true, data: frame.data };
   }
 
-  if (typeof frame.numeric === "number") {
+  // bridge.mrc sends numeric 0 to mean "no numeric", since mSL always fills the field.
+  if (typeof frame.numeric === "number" && frame.numeric > 0) {
     const error = classifyNumeric(frame.numeric, context, frame.err);
     // mSL may know a more specific hint than we can infer from the numeric alone.
     return { ok: false, error: frame.hint ? { ...error, hint: frame.hint } : error };
@@ -134,6 +156,14 @@ export function normalizeRes(
       error: bridgeError(frame.code as ErrorCode, frame.hint ?? "the command failed.", {
         detail: frame.err,
       }),
+    };
+  }
+
+  const token = frame.err ? ERR_TOKENS[frame.err] : undefined;
+  if (token) {
+    return {
+      ok: false,
+      error: bridgeError(token.code, frame.hint ?? token.hint, { detail: frame.err }),
     };
   }
 

@@ -1,6 +1,7 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import {
   encodeFrame,
+  escapeControlChars,
   fitsFrame,
   FrameTooLargeError,
   LineDecoder,
@@ -91,4 +92,16 @@ Deno.test("parseInbound rejects anything that is not a tagged object", () => {
   assertThrows(() => parseInbound("[1,2,3]"));
   assertThrows(() => parseInbound('"a string"'));
   assertThrows(() => parseInbound('{"nope":1}'));
+});
+
+Deno.test("parseInbound accepts IRC formatting codes left raw inside a string", () => {
+  const line = '{"t":"ev","kind":"text","net":"n","text":"\x02bold\x02 \x0304red"}';
+  const frame = parseInbound(line) as Record<string, unknown>;
+  assertEquals(frame.text, "\x02bold\x02 \x0304red");
+});
+
+Deno.test("escapeControlChars leaves tab, newline and valid escapes alone", () => {
+  assertEquals(escapeControlChars('{"a":"x\\u0002y"}\t'), '{"a":"x\\u0002y"}\t');
+  assertEquals(escapeControlChars("\x02"), "\\u0002");
+  assertEquals(escapeControlChars("\x1f"), "\\u001f");
 });

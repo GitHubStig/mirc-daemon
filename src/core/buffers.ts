@@ -19,8 +19,14 @@ export interface LogQuery {
   net?: string;
   buf?: string;
   kinds?: readonly EventKind[];
-  /** Return at most this many of the *newest* matches. Omit for all of them. */
+  /** Return at most this many matches. Omit for all of them. */
   limit?: number;
+  /**
+   * Which end `limit` keeps. "newest" suits a first look at a channel; "oldest"
+   * suits paging forward from a cursor, where dropping the older matches would
+   * lose events the caller has not seen.
+   */
+  keep?: "newest" | "oldest";
 }
 
 export type NewEvent = Omit<BridgeEvent, "seq" | "ts"> & { ts?: number };
@@ -60,7 +66,9 @@ export class EventLog {
   since(cursor: number, query: LogQuery = {}): BridgeEvent[] {
     const found = this.#events.filter((e) => e.seq > cursor && matchesQuery(e, query));
     if (query.limit !== undefined && found.length > query.limit) {
-      return found.slice(found.length - query.limit);
+      return query.keep === "oldest"
+        ? found.slice(0, query.limit)
+        : found.slice(found.length - query.limit);
     }
     return found;
   }
