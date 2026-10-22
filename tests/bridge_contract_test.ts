@@ -12,6 +12,7 @@
 
 import { assertEquals } from "@std/assert";
 import { nullLogger } from "../src/core/log.ts";
+import { toWireCommand } from "../src/core/wire.ts";
 import { type RunningMircListener, startMircListener } from "../src/mirc/listener.ts";
 import { until } from "./fake_mirc.ts";
 
@@ -116,7 +117,7 @@ async function attach(): Promise<Harness> {
   });
 
   const mirc = await RawMirc.connect(listener.addr.hostname, listener.addr.port);
-  mirc.send({ t: "hello", v: 1, token: TOKEN, nick: "me", mirc: "7.75" });
+  mirc.send({ t: "hello", v: 2, token: TOKEN, nick: "me", mirc: "7.75" });
 
   const welcome = await mirc.next();
   assertEquals(welcome?.t, "welcome");
@@ -295,10 +296,10 @@ Deno.test("DCC outcome shapes close a job as complete or failed", async () => {
 // ---------------------------------------------------------------------------
 // String escaping, both directions.
 //
-// These are TypeScript ports of jstr, jval and junesc in bridge.mrc, kept
+// These are TypeScript ports of jstr, jval and jparam in bridge.mrc, kept
 // step-for-step so a change to one has an obvious twin in the other. A port
-// cannot prove mSL behaves the same, but it does pin down what the algorithm is
-// supposed to do, and it feeds the daemon the bytes mIRC would actually send.
+// cannot prove mSL behaves the same -- /bridge.diag's b64-test does that inside
+// mIRC -- but it pins down the algorithm and feeds each side real bytes.
 // ---------------------------------------------------------------------------
 
 /** bridge.mrc `jstr`: escape and quote. */
@@ -319,25 +320,16 @@ function mslJstr(input: string, { escapeControls = true } = {}): string {
   return `"${s}"`;
 }
 
-/** bridge.mrc `junesc_one`. */
-function mslUnescapeOne(c: string): string {
-  if (c === "n" || c === "r") return " ";
-  if (c === "t") return "\t";
-  if (c === "b" || c === "f") return "";
-  if (c.length === 5) {
-    const n = parseInt(c.slice(1), 16);
-    if (n === 0) return "";
-    if (n === 10 || n === 13) return " ";
-    return String.fromCharCode(n);
-  }
-  return c;
+/** bridge.mrc `jval`: up to the next quote, no unescaping. */
+function mslJval(frame: string, key: string): string | undefined {
+  return new RegExp(`"${key}":"([^"]*)"`).exec(frame)?.[1];
 }
 
-/** bridge.mrc `jval` + `junesc`. */
-function mslJval(frame: string, key: string): string | undefined {
-  const match = new RegExp(`"${key}":"((?:[^"\\\\]|\\\\.)*)"`).exec(frame);
-  if (!match) return undefined;
-  return match[1].replace(/\\(["\\/bfnrt]|u[0-9a-fA-F]{4})/g, (_m, c: string) => mslUnescapeOne(c));
+/** bridge.mrc `jparam`: jval, then base64 into a binvar, read back as UTF-8. */
+function mslJparam(frame: string, key: string): string | undefined {
+  const b64 = mslJval(frame, key);
+  if (b64 === undefined || b64 === "") return undefined;
+  return new TextDecoder().decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)));
 }
 
 const COLOURED = "\x02** 3 packs **\x02 \x0304#1\x03 \x1fpack.mkv\x1f\x0f";
@@ -375,7 +367,7 @@ Deno.test("a frame with raw control characters, as an older bridge.mrc sent, sti
   }
 });
 
-Deno.test("jval recovers what the daemon sends, quotes and backslashes included", () => {
+Deno.test("jparam recovers what the daemon sends, quotes and backslashes included", () => {
   const cases: Array<[string, string]> = [
     ['say "hi"', 'say "hi"'],
     ["C:\\dir\\new", "C:\\dir\\new"],
@@ -385,20 +377,74 @@ Deno.test("jval recovers what the daemon sends, quotes and backslashes included"
     ["\x02bold\x02 and \x0304colour", "\x02bold\x02 and \x0304colour"],
     ["ünïcode ✓", "ünïcode ✓"],
     // A real line break must not reach IRC as one: it would start a new command.
-    ["line1\nline2\r\nQUIT", "line1 line2  QUIT"],
+    ["line1\nline2\r\nQUIT", "line1 line2 QUIT"],
     // Text that looks like another key must not be mistaken for it.
     ['x","target":"#evil', 'x","target":"#evil'],
   ];
   for (const [text, expected] of cases) {
-    // encodeFrame is JSON.stringify plus CRLF; this is the line mIRC reads.
-    const line = JSON.stringify({
-      t: "cmd",
-      id: "c1",
-      action: "msg",
-      params: { target: "#x", text },
-    });
-    assertEquals(mslJval(line, "text"), expected, `text: ${JSON.stringify(text)}`);
-    assertEquals(mslJval(line, "target"), "#x", `target beside: ${JSON.stringify(text)}`);
+    // The daemon's real encoding; encodeFrame then adds only CRLF.
+    const line = JSON.stringify(
+      toWireCommand({ t: "cmd", id: "c1", action: "msg", params: { target: "#x", text } }),
+    );
+    assertEquals(mslJparam(line, "text"), expected, `text: ${JSON.stringify(text)}`);
+    assertEquals(mslJparam(line, "target"), "#x", `target beside: ${JSON.stringify(text)}`);
+    // The envelope stays plain, which is what lets jval read it without decoding.
+    assertEquals(mslJval(line, "action"), "msg");
+  }
+});
+
+Deno.test("a command on the socket carries base64 params that jparam decodes", async () => {
+  const h = await attach();
+  try {
+    const sent = h.session()!.commands.send("msg", { target: "#chan", text: 'say "hi" ü' });
+    const cmd = await h.mirc.nextCommand("msg");
+    const params = cmd.params as Record<string, string>;
+    assertEquals(params.text.includes('"'), false);
+    assertEquals(mslJparam(JSON.stringify(cmd), "text"), 'say "hi" ü');
+    h.mirc.send({ t: "res", id: cmd.id, ok: true });
+    assertEquals((await sent).ok, true);
+  } finally {
+    await h.stop();
+  }
+});
+
+Deno.test("the diag self-test vector in bridge.mrc is the daemon's real encoding", async () => {
+  // /bridge.diag decodes this literal inside mIRC; if the encoding ever changes,
+  // the literal has to change with it or the in-client check proves nothing.
+  const mrc = await Deno.readTextFile(new URL("../mirc/bridge.mrc", import.meta.url));
+  const vector = /\$kvo\(text, \$jstr\(([A-Za-z0-9+/=]+)\)\)/.exec(mrc)?.[1];
+  const wire = toWireCommand({
+    t: "cmd",
+    id: "c1",
+    action: "echo",
+    params: { text: 'say "hi" C:\\dir \u00fc\u0002b' },
+  });
+  assertEquals(vector, (wire.params as Record<string, string>).text);
+});
+
+Deno.test("a v1 bridge.mrc is refused with a reason, not served", async () => {
+  const listener = startMircListener({
+    hostname: "127.0.0.1",
+    port: 0,
+    token: TOKEN,
+    log: nullLogger(),
+    maxInFlight: 1,
+    defaultCommandTimeoutMs: 1000,
+    helloTimeoutMs: 500,
+  });
+  const mirc = await RawMirc.connect(listener.addr.hostname, listener.addr.port);
+  try {
+    mirc.send({ t: "hello", v: 1, token: TOKEN, nick: "me", mirc: "7.75" });
+    const bye = await mirc.next();
+    assertEquals(bye?.t, "bye");
+    assertEquals(String(bye?.reason).includes("bridge.mrc"), true);
+    // Plain ASCII without quotes, because jval reads it undecoded.
+    assertEquals(/["\\]/.test(String(bye?.reason)), false);
+    assertEquals(await mirc.next(500), undefined);
+    assertEquals(listener.registry.size, 0);
+  } finally {
+    await mirc.close();
+    await listener.close();
   }
 });
 

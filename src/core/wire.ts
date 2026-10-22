@@ -14,7 +14,7 @@
  * U+2028/U+2029 are legal inside JSON strings and a naive reader would corrupt them.
  */
 
-import { MAX_FRAME_BYTES } from "./types.ts";
+import { type CmdFrame, MAX_FRAME_BYTES } from "./types.ts";
 
 const LF = 0x0a;
 const CR = 0x0d;
@@ -55,6 +55,48 @@ export function encodeFrame(frame: unknown, limit = MAX_FRAME_BYTES): Uint8Array
   out[body.length] = CR;
   out[body.length + 1] = LF;
   return out;
+}
+
+/**
+ * The form a command takes on the wire: every string param base64-encoded.
+ *
+ * mSL has no JSON parser, and reading an escaped JSON string with mSL regexes
+ * was where the bridge's quoting bugs lived. Base64 has no quote or backslash, so
+ * mIRC can lift a value with a plain `"key":"([^"]*)"` and decode it with a
+ * builtin. Only params are encoded: the envelope (`t`, `id`, `action`) is ours,
+ * ASCII, and stays readable in a wire trace.
+ *
+ * Line breaks become spaces first. A newline inside an IRC message would be cut
+ * by mIRC at best, and at worst start a second protocol line, so agent text is
+ * never allowed to carry one through to the client.
+ */
+export function toWireCommand(cmd: CmdFrame): CmdFrame {
+  if (!cmd.params) return cmd;
+  const params: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(cmd.params)) {
+    params[key] = typeof value === "string" ? toBase64(value.replace(/\r\n|[\r\n]/g, " ")) : value;
+  }
+  return { ...cmd, params };
+}
+
+/** The inverse, for test doubles that stand in for bridge.mrc. */
+export function fromWireCommand(cmd: CmdFrame): CmdFrame {
+  if (!cmd.params) return cmd;
+  const params: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(cmd.params)) {
+    params[key] = typeof value === "string" ? fromBase64(value) : value;
+  }
+  return { ...cmd, params };
+}
+
+function toBase64(text: string): string {
+  let binary = "";
+  for (const byte of encoder.encode(text)) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function fromBase64(b64: string): string {
+  return decoder.decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)));
 }
 
 /** True when the frame fits within the line limit. */

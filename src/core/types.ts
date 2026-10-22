@@ -4,8 +4,13 @@
  * Keep this file dependency-free: everything else imports from it.
  */
 
-/** Wire protocol version. Bumped only on a breaking frame-shape change. */
-export const PROTOCOL_VERSION = 1;
+/**
+ * Wire protocol version. Bumped only on a breaking frame-shape change.
+ *
+ * 2: string command params are base64. A v1 bridge.mrc would post the encoded
+ *    text verbatim, so a mismatched hello is refused rather than tolerated.
+ */
+export const PROTOCOL_VERSION = 2;
 
 /** mIRC's line limit is just under 4150 bytes; leave headroom. */
 export const MAX_FRAME_BYTES = 3500;
@@ -31,7 +36,8 @@ export type ErrorCode =
   | "server_error"
   | "timeout"
   | "guard_denied"
-  | "weak_match";
+  | "weak_match"
+  | "too_long";
 
 /** A structured failure. `hint` is written for an LLM to read and relay. */
 export interface BridgeError {
@@ -198,7 +204,13 @@ export interface PingFrame {
   t: "ping";
 }
 
-export type OutboundFrame = CmdFrame | WelcomeFrame | PingFrame;
+/** Sent before the daemon closes a connection it will not serve, so mIRC can say why. */
+export interface ByeFrame {
+  t: "bye";
+  reason: string;
+}
+
+export type OutboundFrame = CmdFrame | WelcomeFrame | PingFrame | ByeFrame;
 
 // ---------------------------------------------------------------------------
 // Internal model

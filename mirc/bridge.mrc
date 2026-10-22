@@ -98,38 +98,30 @@ alias -l reshead { return $chr(123) $+ $kvo(t, $jstr(res)) $+ $chr(44) $+ $kvo(i
 ; reports a timeout. Regex is one expression, no offsets to get wrong.
 
 ;
-; The value pattern is "anything but a quote or backslash, or a backslash and
-; any one character", so an escaped quote no longer ends the value early, and
-; the result is unescaped before use. The previous [^"]* stopped at the first \"
-; and handed mIRC the raw escapes: `say "hi"` went out as `say \`.
-; Built from $chr() because a literal | would split the command in two.
+; This reads a string value only up to the next quote, which is correct here by
+; construction rather than by luck: the daemon's own envelope fields (t, id,
+; action) never contain quotes or backslashes, and every command param arrives
+; as base64, which cannot. An earlier version had to read and unescape full
+; JSON strings in mSL; that is where `say "hi"` turned into `say \`.
 alias -l jval {
-  var %pat = / $+ $chr(34) $+ $2 $+ $chr(34) $+ $chr(58) $+ $chr(34) $+ ((?:[^ $+ $chr(34) $+ $chr(92) $+ $chr(92) $+ ] $+ $chr(124) $+ $chr(92) $+ $chr(92) $+ .)*) $+ $chr(34) $+ /
-  if ($regex($1, %pat)) return $junesc($regml(1))
+  var %pat = / $+ $chr(34) $+ $2 $+ $chr(34) $+ $chr(58) $+ $chr(34) $+ ([^ $+ $chr(34) $+ ]*) $+ $chr(34) $+ /
+  if ($regex($1, %pat)) return $regml(1)
 }
 
-; Undo JSON string escapes in one pass, so an escaped backslash followed by a
-; letter is never mistaken for a second escape. The capture is restricted to
-; the legal escape characters, none of which is special in an identifier call.
-alias -l junesc {
-  var %re = / $+ $chr(92) $+ $chr(92) $+ ([ $+ $chr(34) $+ $chr(92) $+ $chr(92) $+ /bfnrt] $+ $chr(124) $+ u[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F])/g
-  return $regsubex($1, %re, $junesc_one(\1))
-}
-
-; One escape. Newlines become spaces: a line break inside an IRC message would
-; either be cut by mIRC or, worse, start a second protocol line.
-alias -l junesc_one {
-  var %c = $1
-  if (%c === n || %c === r) return $chr(32)
-  if (%c === t) return $chr(9)
-  if (%c === b || %c === f) return
-  if ($len(%c) == 5) {
-    var %n = $base($right(%c, 4), 16, 10)
-    if (%n == 0) return
-    if (%n == 10 || %n == 13) return $chr(32)
-    return $chr(%n)
-  }
-  return %c
+; A command param: base64 on the wire (protocol v2), decoded here.
+; Decoded through a binary variable so the bytes are read back as UTF-8 text
+; rather than one character per byte. The daemon has already turned line
+; breaks into spaces, so the result is always safe to hand to /msg.
+; VERIFY: $bvar().text decodes UTF-8 -- /bridge.diag's b64-test checks it.
+alias -l jparam {
+  var %b64 = $jval($1, $2)
+  if (%b64 == $null) return
+  ; A binvar is not truncated by bset, so clear it or a longer earlier value
+  ; would leave its tail on this one.
+  bunset &bridge_b64
+  bset -t &bridge_b64 1 %b64
+  noop $decode(&bridge_b64, bm)
+  return $bvar(&bridge_b64, 1-).text
 }
 
 alias -l jnum {
@@ -173,6 +165,13 @@ alias bridge.diag {
   ; Self-test for the inbound reader, using the same builders as a real frame.
   var %probe = $chr(123) $+ $kvo(t, $jstr(cmd)) $+ $chr(44) $+ $kvo(id, $jstr(c1)) $+ $chr(44) $+ $kvo(action, $jstr(state)) $+ $chr(125)
   echo -a * bridge: jval-test t= $+ $jval(%probe, t) $+ id= $+ $jval(%probe, id) $+ action= $+ $jval(%probe, action)
+  ; The param decoder, run inside mIRC itself. The vector is the daemon's
+  ; encoding of: say "hi" C:\dir u-umlaut ^B b -- a quote pair, a backslash,
+  ; a non-ASCII letter and an IRC bold code, each of which broke a reader once.
+  var %frame = $chr(123) $+ $kvo(text, $jstr(c2F5ICJoaSIgQzpcZGlyIMO8AmI=)) $+ $chr(125)
+  var %want = say $chr(34) $+ hi $+ $chr(34) C:\dir $chr(252) $+ $chr(2) $+ b
+  var %got = $jparam(%frame, text)
+  echo -a * bridge: b64-test $iif(%got === %want, ok, FAILED got= $+ %got)
 }
 
 ; Sends a known frame straight down the socket, bypassing everything else.
@@ -186,7 +185,7 @@ alias bridge.test {
 ; Built in one place so the diagnostic can show exactly what would be sent.
 ; $1 = token, so the diagnostic can pass a mask instead.
 alias -l bridge_helloframe {
-  return $chr(123) $+ $kvo(t, $jstr(hello)) $+ $chr(44) $+ $kvo(v, 1) $+ $chr(44) $+ $kvo(token, $jstr($1)) $+ $chr(44) $+ $kvo(nick, $jstr($me)) $+ $chr(44) $+ $kvo(mirc, $jstr($version)) $+ $chr(125)
+  return $chr(123) $+ $kvo(t, $jstr(hello)) $+ $chr(44) $+ $kvo(v, 2) $+ $chr(44) $+ $kvo(token, $jstr($1)) $+ $chr(44) $+ $kvo(nick, $jstr($me)) $+ $chr(44) $+ $kvo(mirc, $jstr($version)) $+ $chr(125)
 }
 
 ; Not -l: it is run from a timer, and whether a timer may call a local alias is
@@ -245,6 +244,10 @@ alias -l bridge_dispatch {
   ; An unparseable frame used to vanish silently; make it visible instead.
   if (%t == $null) { echo -a * bridge: unparsed frame: $1- | return }
   if (%t == ping) { bridge_send $chr(123) $+ $kvo(t, $jstr(pong)) $+ $chr(125) | return }
+  ; The daemon refused us (e.g. a protocol mismatch). Say why and stop
+  ; retrying, rather than reconnecting every few seconds to be refused again.
+  ; The reason is daemon-written plain ASCII, so jval reads it as-is.
+  if (%t == bye) { echo -a * bridge: daemon refused: $jval($1-, reason) | bridge.stop | return }
   if (%t == cmd) bridge_command $jval($1-, id) $jval($1-, action) $1-
 }
 
@@ -268,16 +271,17 @@ alias -l bridge_fail {
 alias -l bridge_command {
   var %id = $1, %act = $2, %f = $3-
   if (%act == state) { bridge_do_state %id | return }
-  if (%act == members) { bridge_do_members %id $jval(%f, channel) $jval(%f, nick) | return }
-  if (%act == ison) { bridge_do_ison %id $jval(%f, list) | return }
-  if (%act == join) { bridge_do_join %id $jval(%f, channel) $jval(%f, key) | return }
-  if (%act == part) { bridge_do_part %id $jval(%f, channel) | return }
-  if (%act == msg) { bridge_do_msg %id $jval(%f, target) $jval(%f, text) | return }
-  if (%act == notice) { bridge_do_notice %id $jval(%f, target) $jval(%f, text) | return }
-  if (%act == echo) { bridge_do_echo %id $jval(%f, text) | return }
+  if (%act == members) { bridge_do_members %id $jparam(%f, channel) $jparam(%f, nick) | return }
+  if (%act == ison) { bridge_do_ison %id $jparam(%f, list) | return }
+  if (%act == join) { bridge_do_join %id $jparam(%f, channel) $jparam(%f, key) | return }
+  if (%act == part) { bridge_do_part %id $jparam(%f, channel) | return }
+  if (%act == msg) { bridge_do_msg %id $jparam(%f, target) $jparam(%f, text) | return }
+  if (%act == notice) { bridge_do_notice %id $jparam(%f, target) $jparam(%f, text) | return }
+  if (%act == echo) { bridge_do_echo %id $jparam(%f, text) | return }
   ; Port is always passed (0 for none) so a password cannot shift into its slot.
-  if (%act == connect) { bridge_do_connect %id $jval(%f, server) $iif($jnum(%f, port), $v1, 0) $jval(%f, password) | return }
-  if (%act == raw) { bridge_do_raw %id $jval(%f, line) | return }
+  ; Numbers are not encoded, so the port is read with jnum.
+  if (%act == connect) { bridge_do_connect %id $jparam(%f, server) $iif($jnum(%f, port), $v1, 0) $jparam(%f, password) | return }
+  if (%act == raw) { bridge_do_raw %id $jparam(%f, line) | return }
   if (%act == quit) { bridge_ok %id | quit | return }
   bridge_fail %id 0 unknown-action-$+(%act)
 }

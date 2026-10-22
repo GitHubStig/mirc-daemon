@@ -17,7 +17,7 @@ Proven by running it, with evidence in the log:
   daemon's state model then holds the network, the joined channel and member counts.
 - **Daemon runs**: `deno task start` binds `127.0.0.1:8686` (mIRC, raw TCP) and `127.0.0.1:8687`
   (agents, HTTP). `/health` is unauthenticated, `/status` and `/mcp` require the bearer token.
-- **160 automated tests** (`deno task test`): MBP framing including CRLF and oversize rejection,
+- **168 automated tests** (`deno task test`): MBP framing including CRLF and oversize rejection,
   logging with redaction, the state model, the event log and waits, credit-limited command dispatch,
   the failure taxonomy, DCC outcome tracking, the listener, config, the INI reader, the HTTP door,
   the 20-tool MCP surface driven by the SDK's own client, and the frame shapes `bridge.mrc` emits
@@ -28,14 +28,18 @@ Proven by running it, with evidence in the log:
 
 Assumed or untested. Treat these as the actual risk surface:
 
-- **The audit fixes to `bridge.mrc` have never run in mIRC.** The handshake above was proven with
-  the previous version. The new string handling is mirrored in TypeScript in
-  `tests/bridge_contract_test.ts`, which pins down the algorithm, not the mSL. Re-copy `bridge.mrc`
-  into the mIRC folder, then check, in this order:
-  1. `/bridge.diag` still prints `jval-test t=cmd id=c1 action=state`, since `jval` was rewritten.
+- **The audit fixes and protocol v2 have never run in mIRC.** The handshake above was proven with
+  the v1 script, which the daemon now refuses: copy the repo's `bridge.mrc` into the mIRC folder
+  before anything else, or mIRC will print "daemon refused" and stop. The string handling is
+  mirrored in TypeScript in `tests/bridge_contract_test.ts`, which pins down the algorithm, not the
+  mSL. Then check, in this order:
+  1. `/bridge.diag` prints `jval-test t=cmd id=c1 action=state` **and `b64-test ok`**. The second is
+     the param decoder running inside mIRC on a string with a quote pair, a backslash, `ü` and a
+     bold code. If it fails, nothing that sends text will work, so stop there. The likeliest suspect
+     is whether `$bvar().text` decodes UTF-8.
   2. Someone sends a **bold or coloured** line in a channel: it shows in `irc_read` with its
      formatting codes, and `deno task log:tail` shows no `mbp.bad-frame`.
-  3. `irc_send` with `say "hi" C:\dir` arrives in the channel exactly like that.
+  3. `irc_send` with `say "hi" C:\dir ü` arrives in the channel exactly like that.
   4. `irc_join` on a channel you are already in returns at once with `already: true`. On a channel
      that refuses you, it fails with a code within 8s.
   5. `irc_members` on a large channel returns `truncated: true` rather than timing out.
@@ -80,7 +84,9 @@ Found by audit rather than by running it, and fixed in the same silent shape:
 7. **IRC formatting codes are control characters.** `jstr` escaped only `\n \r \t`, so every bold or
    coloured line was invalid JSON and dropped by the daemon. Most XDCC bot output is coloured.
 8. **`"([^"]*)"` is not a JSON string reader.** It stopped at the first escaped quote and never
-   unescaped, so `say "hi"` went out as `say \`.
+   unescaped, so `say "hi"` went out as `say \`. The fix was to stop asking mSL to read JSON
+   strings: since protocol v2, params arrive as base64, and the plain pattern is correct by
+   construction (ADR-0002).
 9. **A pattern with a literal `|` is two commands.** Any regex alternation in mSL is built with
    `$chr(124)`.
 

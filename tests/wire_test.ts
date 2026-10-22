@@ -4,8 +4,10 @@ import {
   escapeControlChars,
   fitsFrame,
   FrameTooLargeError,
+  fromWireCommand,
   LineDecoder,
   parseInbound,
+  toWireCommand,
 } from "../src/core/wire.ts";
 import { MAX_FRAME_BYTES } from "../src/core/types.ts";
 
@@ -104,4 +106,46 @@ Deno.test("escapeControlChars leaves tab, newline and valid escapes alone", () =
   assertEquals(escapeControlChars('{"a":"x\\u0002y"}\t'), '{"a":"x\\u0002y"}\t');
   assertEquals(escapeControlChars("\x02"), "\\u0002");
   assertEquals(escapeControlChars("\x1f"), "\\u001f");
+});
+
+Deno.test("toWireCommand base64-encodes string params and leaves the envelope plain", () => {
+  const cmd = {
+    t: "cmd" as const,
+    id: "c7",
+    action: "connect" as const,
+    params: { server: "irc.example.net", port: 6697, password: 'p"w\\d' },
+  };
+  const wire = toWireCommand(cmd);
+  assertEquals(wire.t, "cmd");
+  assertEquals(wire.id, "c7");
+  assertEquals(wire.action, "connect");
+  const params = wire.params as Record<string, unknown>;
+  // Numbers are left alone: mSL reads them with jnum.
+  assertEquals(params.port, 6697);
+  // Nothing in an encoded value can end a JSON string early.
+  for (const key of ["server", "password"]) {
+    assertEquals(/^[A-Za-z0-9+/=]*$/.test(params[key] as string), true, key);
+  }
+  assertEquals(fromWireCommand(wire), cmd);
+});
+
+Deno.test("toWireCommand turns every line break into a space before encoding", () => {
+  const wire = toWireCommand({
+    t: "cmd",
+    id: "c1",
+    action: "msg",
+    params: { target: "#x", text: "a\nb\r\nc\rd" },
+  });
+  assertEquals(fromWireCommand(wire).params?.text, "a b c d");
+});
+
+Deno.test("toWireCommand round-trips UTF-8 and IRC formatting codes", () => {
+  const text = "\x02bold\x02 ünïcode ✓ \x0304red";
+  const wire = toWireCommand({ t: "cmd", id: "c1", action: "msg", params: { text } });
+  assertEquals(fromWireCommand(wire).params?.text, text);
+});
+
+Deno.test("a command without params is sent unchanged", () => {
+  const cmd = { t: "cmd" as const, id: "c1", action: "state" as const };
+  assertEquals(toWireCommand(cmd), cmd);
 });

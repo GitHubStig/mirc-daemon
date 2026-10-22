@@ -1,5 +1,6 @@
 import { assertEquals } from "@std/assert";
 import { CommandDispatcher } from "../src/core/commands.ts";
+import { FrameTooLargeError } from "../src/core/wire.ts";
 import type { CmdFrame, ResFrame } from "../src/core/types.ts";
 
 /** Let queued microtasks run so a send reaches the wire. */
@@ -172,5 +173,22 @@ Deno.test("a frame that cannot be encoded fails the command instead of the proce
     assertEquals(outcome.error.code, "connect_failed");
     assertEquals(outcome.error.hint.includes("could not send"), true);
   }
+  assertEquals(dispatcher.outstanding, 0);
+});
+
+Deno.test("a frame too large to send is too_long, not a dropped connection", async () => {
+  const dispatcher = new CommandDispatcher({
+    write: () => {
+      throw new FrameTooLargeError(9000, 3500);
+    },
+    defaultTimeoutMs: 1000,
+  });
+  const outcome = await dispatcher.send("msg", { target: "#x", text: "long" });
+  assertEquals(outcome.ok, false);
+  if (!outcome.ok) {
+    assertEquals(outcome.error.code, "too_long");
+    assertEquals(outcome.error.hint.includes("9000 bytes"), true);
+  }
+  // The credit is returned, so the next command is not stuck behind it.
   assertEquals(dispatcher.outstanding, 0);
 });

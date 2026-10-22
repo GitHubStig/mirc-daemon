@@ -22,6 +22,7 @@ import {
 } from "./types.ts";
 import { type CommandOutcome, normalizeRes, type OutcomeContext } from "./outcomes.ts";
 import type { LogSink } from "./log.ts";
+import { FrameTooLargeError } from "./wire.ts";
 
 export const DEFAULT_MAX_IN_FLIGHT = 1;
 export const DEFAULT_COMMAND_TIMEOUT_MS = 10_000;
@@ -157,10 +158,17 @@ export class CommandDispatcher {
         clearTimeout(timer);
         this.#pending.delete(id);
         this.#gate.release();
-        resolve({
-          ok: false,
-          error: bridgeError("connect_failed", `could not send to mIRC: ${(err as Error).message}`),
-        });
+        // An oversized frame is the caller's input, not a broken link, and an
+        // agent can fix it by shortening the text; say that rather than
+        // claiming mIRC is unreachable.
+        const error = err instanceof FrameTooLargeError
+          ? bridgeError(
+            "too_long",
+            `that "${action}" is too long to send to mIRC in one command (${err.bytes} bytes ` +
+              "once encoded). Shorten it or split it into several calls.",
+          )
+          : bridgeError("connect_failed", `could not send to mIRC: ${(err as Error).message}`);
+        resolve({ ok: false, error });
       }
     });
   }

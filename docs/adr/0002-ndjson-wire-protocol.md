@@ -24,21 +24,39 @@ read, since `sockread` waits for `$crlf` and silently yields nothing until it ar
 
 The decoder splits on LF alone, not on "universal newlines".
 
-Strings are escaped in full on both sides. mSL builds JSON by hand, so `bridge.mrc` escapes every C0
-control character, not just newline, CR and tab, because IRC formatting (bold, colour, underline,
-reset) is made of control characters and `JSON.parse` rejects them raw. The daemon also escapes any
-stray control character before parsing, since a user's copy of `bridge.mrc` can be older than the
-daemon. Going the other way, `bridge.mrc` reads a value as "non-quote, non-backslash, or backslash
-plus one character" and then unescapes it. Line breaks in outbound text become spaces, so an agent's
-text can never start a second IRC command.
+The two directions handle strings differently, because only one side has a JSON parser.
 
-Values mSL would have to find by position are sent as plain strings instead. `ison` takes its nicks
-as one space-separated `list`, because the JSON array was found by bracket position and nicks such
-as `[XDCC]Bot` contain brackets.
+**mIRC → daemon:** mSL builds JSON by hand and the daemon parses it with `JSON.parse`. `bridge.mrc`
+escapes every C0 control character, not just newline, CR and tab, because IRC formatting (bold,
+colour, underline, reset) is made of control characters and `JSON.parse` rejects them raw. The
+daemon also escapes any stray control character before parsing, since a user's copy of `bridge.mrc`
+can be older than the daemon.
+
+**Daemon → mIRC (protocol v2):** every string inside `params` is base64 (UTF-8 bytes); numbers are
+left as they are. mSL has no JSON parser. Reading and unescaping full JSON strings with mSL regexes
+was where the bridge's quoting bugs lived: `say "hi"` reached IRC as `say \`. Base64 has no quote or
+backslash, so mIRC lifts a value with a plain `"key":"([^"]*)"` and decodes it with the builtin
+`$decode`, through a binary variable so the bytes are read back as UTF-8. The envelope (`t`, `id`,
+`action`) and the `bye` reason stay plain ASCII the daemon writes itself, so wire traces stay
+readable. The daemon log records commands decoded, which is also what keeps a base64 password inside
+the redactor's reach. Line breaks in params become spaces before encoding, so agent text can never
+start a second IRC command. A `params` value that would push the frame past the limit is refused as
+`too_long` rather than sent.
+
+Because a v1 `bridge.mrc` would post base64 into a channel verbatim, the daemon refuses a mismatched
+`hello` and sends `{"t":"bye","reason":…}` first. `bridge.mrc` echoes the reason and stops retrying.
+
+Lists are sent as plain space-separated strings rather than JSON arrays. `ison` takes its nicks as
+one `list`, because mSL found the array by bracket position and nicks such as `[XDCC]Bot` contain
+brackets.
 
 ## Consequences
 
-- Framing is exact and lossless, and a wire trace is readable in any terminal.
+- Framing is exact and lossless, and a wire trace is readable in any terminal, except for command
+  params, which are base64 on the wire and readable only in the daemon's own log.
+- Base64 grows a value by a third, so the longest message that fits in one frame is shorter than it
+  would be in plain JSON. IRC caps a line at 512 bytes anyway, so this binds only on pathological
+  input, and the failure is a clear `too_long`.
 - A frame that would not fit is a bug on our side, surfaced at the call site instead of in the
   client.
 - Commands are serialized by default, which matches how mSL actually executes but caps throughput at

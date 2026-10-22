@@ -7,7 +7,7 @@
  * end-to-end without an IRC network.
  */
 
-import { encodeFrame, LineDecoder, parseInbound } from "../src/core/wire.ts";
+import { encodeFrame, fromWireCommand, LineDecoder, parseInbound } from "../src/core/wire.ts";
 import type { CmdFrame, EventKind, NetworkState, WelcomeFrame } from "../src/core/types.ts";
 import { PROTOCOL_VERSION } from "../src/core/types.ts";
 
@@ -139,7 +139,8 @@ export class FakeMirc {
           if (frame.t === "welcome") {
             this.welcome = frame as unknown as WelcomeFrame;
           } else if (frame.t === "cmd") {
-            this.#onCommand(frame as unknown as CmdFrame);
+            // Decode params as bridge.mrc does, so tests assert on real values.
+            this.#onCommand(fromWireCommand(frame as unknown as CmdFrame));
           }
         }
       }

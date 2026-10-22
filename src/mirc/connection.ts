@@ -7,7 +7,7 @@
  * an agent cannot drop an IRC session.
  */
 
-import { encodeFrame, LineDecoder, parseInbound } from "../core/wire.ts";
+import { encodeFrame, LineDecoder, parseInbound, toWireCommand } from "../core/wire.ts";
 import { Session, type SessionRegistry } from "../core/sessions.ts";
 import type { EventFrame, HelloFrame, InboundFrame, ResFrame } from "../core/types.ts";
 import { PROTOCOL_VERSION } from "../core/types.ts";
@@ -44,11 +44,13 @@ class SocketWriter {
     this.#log = log;
   }
 
-  write(frame: unknown): void {
+  /** `wire` is what is sent when it differs from what is worth logging (encoded params). */
+  write(frame: unknown, wire: unknown = frame): void {
     if (this.#closed) throw new Error("socket closed");
-    const bytes = encodeFrame(frame);
+    const bytes = encodeFrame(wire);
     // Log the decoded frame rather than the bytes: the file sink is the wire
-    // trace, and redaction works on fields, not on raw buffers.
+    // trace, redaction works on fields rather than raw buffers, and a base64
+    // password would sail straight past the redactor.
     this.#log.debug("mbp.out", { frame });
     this.#queue = this.#queue
       .then(async () => {
@@ -130,11 +132,20 @@ export async function handleMircConnection(
       close("bad token");
       return;
     }
-    if (typeof frame.v === "number" && frame.v !== PROTOCOL_VERSION) {
+    if (frame.v !== PROTOCOL_VERSION) {
+      // Refused, not tolerated: a v1 bridge.mrc reads base64 params as plain
+      // text, so it would post the encoded string into a channel verbatim.
       connectionLog.warn("mirc.protocol-mismatch", {
         theirs: frame.v,
         ours: PROTOCOL_VERSION,
       });
+      writer.write({
+        t: "bye",
+        reason: `protocol v${frame.v} is not supported; this daemon speaks v${PROTOCOL_VERSION}. ` +
+          "Copy the bridge.mrc from this repo into the mIRC folder and reload it.",
+      });
+      void writer.flush().then(() => close("protocol mismatch"));
+      return;
     }
 
     clearTimeout(helloTimer);
@@ -143,7 +154,7 @@ export async function handleMircConnection(
       id,
       nick: frame.nick,
       mirc: frame.mirc,
-      write: (cmd) => writer.write(cmd),
+      write: (cmd) => writer.write(cmd, toWireCommand(cmd)),
       log: connectionLog.child({ session: id }),
       maxInFlight: options.maxInFlight,
       defaultCommandTimeoutMs: options.defaultCommandTimeoutMs,

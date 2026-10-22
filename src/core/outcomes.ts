@@ -91,6 +91,7 @@ const KNOWN_CODES = new Set<string>([
   "timeout",
   "guard_denied",
   "weak_match",
+  "too_long",
 ]);
 
 export function classifyNumeric(
