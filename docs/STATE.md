@@ -73,26 +73,24 @@ Proven by running it, with evidence in the log:
   - The new server spells the network **`EFnet`**, where the old one said `EFNet`. Network names are
     now matched case-insensitively throughout.
 
+- **Protocol v3, multi-connection** (2026-10-22, ADR-0012 phase 1). The script was loaded straight
+  from the repo.
+  - `/bridge.diag`'s `conns` line: `cid 1, EFnet, irc.deft.com, connected`, with `sreq: "auto"`.
+    This proves `$scon(N)`, `/scid` and `$sreq`. `b64-test ok` still passes.
+  - `irc_ensure_connected {network: "Rizon", server: "irc.rizon.net"}` opened a **second**
+    connection (`cid 607`) in 28.1 s. EFNet (`cid 1`) stayed connected and in `#home!`. That proves
+    `/server -m` and finding the new id by comparing the list before and after. mIRC's ids are
+    window numbers, not a 1, 2, 3 count.
+  - On Rizon, a join answered in 240 ms and a part in 303 ms. A self-message sent with
+    `network: "Rizon"` came back tagged `cid 607 / Rizon` in 168 ms.
+  - With both up, an `irc_send` naming no network was refused as `ambiguous_network`, listing both
+    cids. `irc_ensure_connected` for EFnet borrowed `cid 1` (`skipped: true`), with no reconnect.
+
 ## Not verified
 
 Assumed or untested. Treat these as the actual risk surface.
 
-**Protocol v3 (multi-connection, ADR-0012) has never run in mIRC.** Load the new `bridge.mrc` (the
-daemon refuses v2), then, in order:
-
-1. `/bridge.diag` writes to the `@bridge` window and brings it forward. `conns =` lists your EFNet
-   connection with a numeric `cid`, the right network, `"status":"connected"`, and a `sreq` of
-   `auto`. This proves `$scon(N)`, `/scid` and `$sreq`. `b64-test ok` still passes.
-2. `irc_get_state` lists EFNet with its `cid` and `#home!`.
-3. `irc_ensure_connected {network: "Rizon", server: "irc.rizon.net"}` opens a **second** connection
-   window. EFNet stays connected and in `#home!`, and the call returns the new `cid` once Rizon has
-   registered. This proves `/server -m` and finding the new `cid`.
-4. `irc_ensure_joined` on a Rizon channel, then `irc_send` with `network: "Rizon"`: the message goes
-   out on Rizon, not EFNet. With both connected, an `irc_send` naming no network is refused as
-   `ambiguous_network`.
-5. `irc_ensure_connected` for EFNet returns `skipped: true` with your existing connection.
-
-Then, carried over:
+The one remaining live check:
 
 1. `irc_join` on a channel that refuses you fails with a code within 8s, **and** the refusal also
    appears as a raw event. This needs a `+i` or `+k` channel held by someone else: they
@@ -184,7 +182,7 @@ In mIRC: `/load -rs bridge.mrc` then `/bridge.start`. Available while debugging:
 
 ## Next, in order
 
-1. **Verify protocol v3 live**, using the checklist under "Not verified".
+1. **The refused-join check** under "Not verified", when someone can hold a `+i` channel.
 2. **Multi-connection phase 2: ownership** (ADR-0012). An in-memory record of what the agent opened
    and joined. `irc_part` and a new `irc_disconnect` work freely on those and need `confirm: true`
    on the user's.
