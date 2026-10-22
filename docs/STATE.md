@@ -48,9 +48,10 @@ Proven by running it, with evidence in the log:
   - mIRC says each transition exactly once: "lost the daemon connection, retrying every 5s", then
     "reconnected to the daemon".
 - **Other people's traffic** (2026-10-22): a coloured channel line from another nick
-  (`\x034Hello world`) arrived with its `\x03` intact, and a NOTICE to us was buffered under the
-  **sender's** nick. Not one inbound line since the v2 script was loaded carried an unescaped
-  control character, so `jstr` does the work and the daemon's fallback never fires.
+  (`\x034Hello world`) arrived with its `\x03` intact. A NOTICE to us, and a coloured private
+  `/msg`, were each buffered under the **sender's** nick. Not one inbound line since the v2 script
+  was loaded carried an unescaped control character, so `jstr` does the work and the daemon's
+  fallback never fires.
 - **A large channel** (2026-10-22): `irc_members` on `#2600` (385 users) answered in 50 ms with
   `truncated: true`. mIRC stopped at 288 names in a 2,584-byte frame, under the 3,500 limit, and the
   tool returned 200 of them.
@@ -69,8 +70,6 @@ Assumed or untested. Treat these as the actual risk surface. The remaining live 
    appears as a raw event. This needs a `+i` or `+k` channel held by someone else.
 2. `irc_connect` while already connected: no spurious `connect_failed` before the new connection
    comes up (see `%bridge_conn_skipdc`). This interrupts the session.
-3. A private `/msg` (not a notice) from someone else is buffered under the sender's nick. It uses
-   the same `bridge_buf` as NOTICE, which is verified, so this is a formality.
 
 Beyond those:
 
