@@ -5,24 +5,117 @@ decision see `docs/adr/`. This file is about what is true **right now**.
 
 ## Short version
 
-The whole chain works end to end: an MCP client drove a real mIRC on EFNet through the daemon, and a
-message with quotes, a backslash, `ü` and a bold code went out and came back byte for byte. What
-remains is the XDCC flow, the failure paths that need a hostile channel or a second network, and DCC
-recon.
+_Last updated 2026-10-22, end of session. Protocol **v3**, 231 tests, 23 MCP tools._
+
+Everything an agent needs works against a real mIRC 7.85:
+
+- driving it over MCP;
+- several networks at once, opening its own connections without ever disconnecting or reconnecting
+  the user's (ADR-0012);
+- leaving, disconnecting and changing nick, freely on its own connections and with `confirm: true`
+  on the user's;
+- TLS;
+- the whole DCC path: offer, completion, failure and cancel, with the file name and size reported so
+  the user can confirm a pack before trusting it (ADR-0010).
+
+**What is left:**
+
+- a real XDCC bot through to completion; only the bot's side is unproven, everything after the offer
+  is;
+- the refused-join check, which needs a `+i` channel held by someone else;
+- whether a transfer that _stalls_ without disconnecting reports anything.
+
+## Picking this up in a new session
+
+Read, in order: `AGENTS.md` (rules, especially: stop for review before every commit, no co-author
+lines), this file, then `docs/adr/` (0010 and 0012 cover most recent work).
+
+**Working conventions settled with the user:**
+
+- **Warn before every `bridge.mrc` save, and batch mSL edits into one save.** mIRC loads the script
+  straight from `<repo>\mirc\bridge.mrc` and pops a reload prompt on every write.
+  Write mSL changes with a small Deno patch script that writes the file once, not with several
+  edits.
+- **Never request a pack whose contents you cannot confirm**, and never from a channel distributing
+  pirated material, even when asked. Self-send (below) tests DCC legitimately.
+- **Nothing sent to IRC may mark the traffic as automated.** No agent nick, and mIRC's own default
+  quit message unless the user gives one.
+- **The user's things are theirs.** The agent may use the user's connections and channels. It
+  leaves, disconnects or renames only when asked, and with `confirm: true` on anything it did not
+  open itself.
+
+**The user's mIRC right now:**
+
+- connected to EFnet as `` me `` (`cid 1`), in `#home!`;
+- a few quit agent windows may still be open;
+- DCC send requests are set to auto-accept (`sreq: auto`);
+- "accept invalid certificates" was turned on for the TLS test;
+- the Local Info IP was restored (box emptied, "always get IP address" re-ticked).
+
+The daemon normally runs under `deno task dev`, which **restarts on every source save**. That starts
+a fresh session, and forgets receipts and DCC jobs, so expect `openedByAgent: false` on agent
+windows after editing code.
+
+**Live testing.** There is no committed client. Drive the daemon with a short Deno script using the
+SDK, reading the token from the gitignored `mirc/bridge.ini`. Never put the token on a command line:
+
+```ts
+import { Client } from "npm:@modelcontextprotocol/sdk@^1.32.1/client/index.js";
+import { StreamableHTTPClientTransport } from "npm:@modelcontextprotocol/sdk@^1.32.1/client/streamableHttp.js";
+const ini = await Deno.readTextFile("mirc/bridge.ini");
+const token = /^\s*token\s*=\s*(\S+)/m.exec(ini)?.[1];
+const c = new Client({ name: "live", version: "0" });
+await c.connect(
+  new StreamableHTTPClientTransport(new URL("http://127.0.0.1:8687/mcp"), {
+    requestInit: { headers: { authorization: `Bearer ${token}` } },
+  }),
+);
+console.log(await c.callTool({ name: "irc_get_state", arguments: {} }));
+await c.close();
+```
+
+Run it with `deno run --allow-net=127.0.0.1:8687 --allow-read=mirc/bridge.ini`. For what happened on
+the wire, read the JSONL log in `logs/`: `mbp.in` and `mbp.out` frames, and `tool.call` records with
+timing and error codes. That is usually faster and more reliable than re-running a test.
+
+**DCC self-send**, to test transfers with no bot:
+
+1. The agent opens a second connection to the user's network (e.g. `irc_connect` to another EFnet
+   server). It gets an alternate nick.
+2. The user runs `/dcc send <that nick> <file>` from their own window.
+3. Sending to yourself needs mIRC's Local Info IP set to `127.0.0.1` temporarily (Options → Connect
+   → Local Info). Otherwise the offer advertises the public IP, and the connect fails, which still
+   tests `GETFAIL`. Remind the user to restore it afterwards.
+4. Avoid `.bin` and other extensions on mIRC's DCC ignore list.
+
+**Shell gotcha on this machine.** Bash heredocs and `deno eval` strings mangle backslashes: `\\n`
+becomes `\n`, and Windows paths break. Write test or patch code with the Write tool, or use
+`String.raw`, and use forward-slash paths in Deno strings.
 
 ## Verified
 
 Proven by running it, with evidence in the log:
 
-- **mIRC 7.85 → daemon**, on EFNet: `hello` → `welcome` → `cmd state` → `res`, 10 ms round trip. The
-  daemon's state model then holds the network, the joined channel and member counts.
+- **mIRC 7.85 → daemon**, on EFNet (first proven with protocol v1; since v3 the daemon asks for
+  `conns`, then `chans` per connection, instead of `state`): `hello` → `welcome` → `cmd state` →
+  `res`, 10 ms round trip. The daemon's state model then holds the network, the joined channel and
+  member counts.
 - **Daemon runs**: `deno task start` binds `127.0.0.1:8686` (mIRC, raw TCP) and `127.0.0.1:8687`
   (agents, HTTP). `/health` is unauthenticated, `/status` and `/mcp` require the bearer token.
 - **231 automated tests** (`deno task test`): MBP framing including CRLF and oversize rejection,
   logging with redaction, the state model, the event log and waits, credit-limited command dispatch,
-  the failure taxonomy, DCC outcome tracking, the listener, config, the INI reader, the HTTP door,
-  the 20-tool MCP surface driven by the SDK's own client, and the frame shapes `bridge.mrc` emits
-  (`tests/bridge_contract_test.ts`).
+  the failure taxonomy, DCC job tracking and the XDCC reply classifier, ownership receipts, the
+  listener, config, the INI reader, the HTTP door, and the 23-tool MCP surface driven by the SDK's
+  own client. The frame shapes `bridge.mrc` emits are covered in `tests/bridge_contract_test.ts`.
+  The tests cannot prove mIRC _runs_ a handler; see traps 15 and 16.
+- **The 23 tools**:
+  - status: `daemon_status`, `irc_list_sessions`, `irc_get_state`;
+  - reading and waiting: `irc_read`, `irc_wait_for`, `irc_members`, `irc_ison`;
+  - connections: `irc_connect`, `irc_ensure_connected`, `irc_disconnect`, `irc_nick`;
+  - channels: `irc_join`, `irc_ensure_joined`, `irc_part`;
+  - speaking: `irc_send`, `irc_notice`, `irc_notify`;
+  - DCC and XDCC: `irc_dcc_status`, `irc_dcc_watch`, `xdcc_list`, `xdcc_fetch`, `xdcc_cancel`;
+  - gated: `irc_raw`, off unless the daemon runs with `--allow-raw`.
 - **The mSL script** sends and receives: the read loop drains, dispatch parses, replies go out.
 - **Protocol v2 in mIRC** (2026-10-22): the hello carries `"v":2` and is accepted. `/bridge.diag`
   prints `jval-test t=cmdid=c1action=state` (the pieces are joined without spaces; the values are
@@ -241,38 +334,72 @@ Found by the live run, invisible to every test because the test double was shape
 
 ## Running it
 
+### Installing (anyone using it)
+
 ```
 deno task token                 # writes mirc/bridge.ini (gitignored) with a fresh token
-```
-
-Copy `mirc/bridge.mrc` and `mirc/bridge.ini` into the mIRC folder — ask mIRC: `//echo -a $mircdir`,
-normally `%APPDATA%\mIRC`. Not the `defaults` folder inside the installation; that holds templates.
-
-Paste the one line from `mirc/remote.ini.snippet` into `remote.ini` there, then:
-
-```
 deno task start                 # leave running
 ```
 
-In mIRC: `/load -rs bridge.mrc` then `/bridge.start`. Available while debugging:
+1. Copy **both** `mirc/bridge.mrc` and `mirc/bridge.ini` into the mIRC folder (`//echo -a $mircdir`,
+   normally `%APPDATA%\mIRC`), or its `scripts\` subfolder; the script finds `bridge.ini` in either.
+   Not the `defaults` folder inside the installation, which only holds templates.
+2. In mIRC, once: `/load -rs bridge.mrc`, then `/bridge.start`. mIRC remembers the script. Paste the
+   one line from `mirc/remote.ini.snippet` into mIRC's `remote.ini` and it also starts the bridge on
+   launch. That line loads `$mircdir\bridge.mrc` only if no `bridge.mrc` is loaded yet.
+3. The token must match on both sides: the daemon reads `mirc/bridge.ini` next to itself, and mIRC
+   reads its copy. Copy the file, do not retype it. After `deno task token`, copy it again.
+4. **After updating the daemon, copy the new `bridge.mrc` as well.** A daemon refuses an older
+   script's protocol version at hello, and the `@bridge` window says so ("daemon refused: protocol
+   v…"), so the mismatch is loud, not silent.
 
-| command         | does                                                                                             |
-| --------------- | ------------------------------------------------------------------------------------------------ |
-| `/bridge.start` | forces a fresh connection (closes any stale socket first)                                        |
-| `/bridge.stop`  | stops the retry timer and closes the socket                                                      |
-| `/bridge.diag`  | ini path, host/port, token present, socket state, hello frame, last received line, state payload |
-| `/bridge.test`  | writes a fixed frame straight down the socket, bypassing everything                              |
+### Developing (this repo)
 
+Load the script **straight from the repo** instead of copying it. Only `bridge.ini` is copied into
+the mIRC folder. The user's mIRC is set up this way:
+
+```
+/load -rs <repo>\mirc\bridge.mrc
+/bridge.start
+```
+
+When the file changes on disk, mIRC offers to reload it; accepting is the whole update. Never also
+load a copy from the mIRC folder, or two scripts handle every event. Check what is loaded with
+`//var %i = 1 | while ($script(%i)) { echo -a $script(%i) | inc %i }`. Run the daemon with
+`deno task dev`, which restarts on every source save (and so starts a fresh session).
+
+### Day to day
+
+The bridge writes its own messages ("lost the daemon connection", "reconnected", diagnostics) to a
+minimised **`@bridge`** window, not the active channel. Available while debugging:
+
+| command         | does                                                                                      |
+| --------------- | ----------------------------------------------------------------------------------------- |
+| `/bridge.start` | forces a fresh connection (closes any stale socket first)                                 |
+| `/bridge.stop`  | stops the retry timer and closes the socket                                               |
+| `/bridge.diag`  | ini path, socket, hello frame, last received line, every connection (`conns`), `b64-test` |
+| `/bridge.test`  | writes a fixed frame straight down the socket, bypassing everything                       |
+
+`/bridge.diag` must print `b64-test ok`; if it does not, nothing that sends text will work.
 `deno task log:tail` shows both directions of every frame, with the token redacted.
 
 ## Next, in order
 
-1. **XDCC end-to-end** against the Linux bot under "Not verified", with EFNet left untouched. It
-   doubles as the DCC recon.
-2. **Close the remaining live gaps** under "Not verified" when the chance arises, including the
-   refused-join check when someone can hold a `+i` channel.
+1. **A real XDCC transfer, through to completion.** Find a bot whose packs can be confirmed over IRC
+   (it answers `xdcc list`, or announces packs in its channel) and that serves something free to
+   share, such as Linux images or public-domain files. Then run `xdcc_fetch` and check, in order:
+   - the bot's reply moves the job (`queued` with a position, or straight to `offered`);
+   - `downloading:` names the right file;
+   - `FILERCVD` closes the job `complete`, with `savedAs`.
+
+   The `irc.williamgattone.it` Linux bot is a dead end: its list sits behind a website banner, on a
+   network that also distributes pirated software.
+2. **Close the remaining live gaps** under "Not verified" when the chance arises: the refused-join
+   check, which needs someone holding a `+i` channel; whether a stalled transfer reports `GETFAIL`;
+   receipts dropping when the user closes an agent window.
 3. **Cleanup**: decide whether `--allow-raw` is needed; consider a daemon-side heartbeat so a dead
-   link is noticed without waiting on TCP.
+   link is noticed without waiting on TCP. `on *:CONNECTFAIL:` is documented as not firing, and a
+   connect to a dead server still costs the full 60 s timeout. Find another signal if that matters.
 
 ## Shape of the thing
 
