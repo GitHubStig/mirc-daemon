@@ -1,6 +1,6 @@
 # 0012. Many connections, addressed by mIRC's connection id
 
-**Status:** accepted (phase 1 of 3 implemented; ownership and DCC start follow)
+**Status:** accepted (phases 1 and 2 implemented; XDCC start follows)
 
 ## Context
 
@@ -57,12 +57,40 @@ channel name or nick on another network cannot complete it.
 This is protocol **v3**. A v2 script would run every command on the active window, so the daemon
 refuses it at `hello`.
 
+## Phase 2: ownership, disconnect and nick
+
+**Receipts, not a register of the user's things.** The daemon records only its own actions: the
+connections it opened and the channels it joined (`OwnershipLedger`). It never records anything
+about the user's; "the user's" simply means "no receipt". The record lives in daemon memory, not in
+mIRC: who opened a connection is daemon policy, and mIRC cannot report it, whereas everything else
+(connections, channels, nicks) mIRC re-reports on every refresh. A daemon restart forgets the
+receipts, so everything counts as the user's until confirmed. That is the safe direction, and it is
+recoverable.
+
+Receipts stay honest on their own. Our own part or kick removes a channel's receipt, a disconnect
+removes all of a connection's channels, and a refresh drops receipts for connections mIRC no longer
+has, e.g. a window the user closed. A join that answers `already: true` earns no receipt: the agent
+borrowed a channel the user was already in.
+
+**The rule.** The agent may _use_ anything: read, join, send, borrow a connection. `irc_part`,
+`irc_disconnect` and `irc_nick` act freely on what has a receipt. On anything else they need
+`confirm: true`, which means "the user asked for this". The daemon cannot verify who asked; this
+stops the agent acting on its own initiative, the same trust model as `irc_raw`. `irc_get_state`
+marks `openedByAgent` and `joinedByAgent`, so the agent can see the line.
+
+**Indistinguishable from a person.** Nothing the daemon sends to IRC marks the traffic as automated.
+Connections inherit the user's nick, with no agent nick. `irc_disconnect` quits with mIRC's own
+default message unless the agent is given one.
+
+**Renames are surfaced.** Each connection records its last nick change (`renamed: {from, to}`),
+which survives refreshes. The typical cause is services: on Rizon, NickServ renamed the user's nick
+to `Guest28669` 20 s after connecting, because the nick is registered to someone else. A later 477
+("registered nick required") join refusal then says what the agent is on that network, whether it
+was renamed, and that the user can identify with NickServ or switch nick with `irc_nick`. The user
+can also change nick in mIRC directly; the daemon follows either way.
+
 ## Still to come
 
-- **Phase 2: ownership.** The daemon keeps an in-memory record of the connections it opened and the
-  channels it joined, never stored in mIRC. Leaving and disconnecting are free on those, and need
-  `confirm: true` on anything else, because that is the user's. A daemon restart forgets the record,
-  so everything counts as the user's until confirmed: safe, and recoverable.
 - **Phase 3: XDCC start.** Recognise the bot's `DCC SEND` offer (already mirrored as a CTCP) as the
   start of a transfer, and use the reported `$sreq` to tell the agent the truth when mIRC is set to
   ask or to ignore.

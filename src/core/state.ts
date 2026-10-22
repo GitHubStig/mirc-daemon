@@ -36,14 +36,20 @@ export class StateModel {
     return this.#lastRefreshTs;
   }
 
-  /** Replace the whole picture from a refresh. */
+  /**
+   * Replace the whole picture from a refresh. The rename record is the one
+   * thing mIRC cannot report, so it is carried over for a connection that is
+   * still there.
+   */
   applyStateFrame(networks: readonly NetworkState[]): void {
-    this.#connections.clear();
+    const previous = this.#connections;
+    this.#connections = new Map();
     for (const net of networks) {
       this.#connections.set(net.cid, {
         ...net,
         channels: [...net.channels],
         members: { ...(net.members ?? {}) },
+        renamed: net.renamed ?? previous.get(net.cid)?.renamed,
       });
     }
     this.#lastRefreshTs = Date.now();
@@ -76,7 +82,11 @@ export class StateModel {
       }
       case "selfnick": {
         const next = event.extra?.new;
-        if (typeof next === "string" && next.length > 0) net.nick = next;
+        if (typeof next === "string" && next.length > 0) {
+          const from = typeof event.extra?.old === "string" ? event.extra.old : net.nick;
+          net.renamed = { from, to: next, ts: event.ts };
+          net.nick = next;
+        }
         break;
       }
       case "join": {

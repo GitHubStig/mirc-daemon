@@ -135,6 +135,37 @@ async function targetOf(
   return session.state.resolve(network);
 }
 
+/** The refusal for touching something the agent did not open or join itself. */
+function usersOwn(what: string, net: NetworkState): ToolResult {
+  return failure(
+    bridgeError(
+      "guard_denied",
+      `${what} on ${net.name} belongs to the user: the agent did not open or join it. Only do ` +
+        "this if the user explicitly asked; then repeat the call with confirm: true.",
+    ),
+  );
+}
+
+/**
+ * A 477 ("you need a registered nick") is usually not about the channel at
+ * all: it means we are not identified, very often because the network's
+ * services renamed us to Guest12345. Say who we are there, whether we were
+ * renamed, and what the user can do, so the agent can relay it.
+ */
+function explainJoinRefusal(error: BridgeError, net: NetworkState): BridgeError {
+  if (error.numeric !== 477) return error;
+  const renamed = net.renamed && net.renamed.to.toLowerCase() === net.nick.toLowerCase()
+    ? ` The network renamed you from "${net.renamed.from}" to "${net.renamed.to}", usually ` +
+      `NickServ enforcing a registered nick.`
+    : "";
+  return {
+    ...error,
+    hint: `${error.hint} You are "${net.nick}" on ${net.name}.${renamed} Tell the user: they can ` +
+      `identify (irc_send to NickServ: IDENTIFY <password>) or switch to a nick they own with ` +
+      `irc_nick, then try again.`,
+  };
+}
+
 // Shared argument pieces.
 const sessionArg = z
   .string()
@@ -202,7 +233,40 @@ const ensureJoinedSchema = z.object({
   network: networkArg,
   channel: z.string(),
 });
-const partSchema = z.object({ session: sessionArg, network: networkArg, channel: z.string() });
+/**
+ * The agent's word that the user asked for this. Leaving or changing anything
+ * the agent did not open or join itself needs it. The daemon cannot verify who
+ * asked, so this stops the agent doing it on its own initiative; it is not
+ * proof of consent.
+ */
+const confirmArg = z
+  .boolean()
+  .optional()
+  .describe(
+    "Set true ONLY when the user explicitly asked for this. Needed for anything the agent did " +
+      "not open or join itself, i.e. the user's own channels and connections.",
+  );
+const partSchema = z.object({
+  session: sessionArg,
+  network: networkArg,
+  channel: z.string(),
+  confirm: confirmArg,
+});
+const disconnectSchema = z.object({
+  session: sessionArg,
+  network: z.string().describe("The network to disconnect from. Required: never inferred."),
+  message: z
+    .string()
+    .optional()
+    .describe("Quit message. Omit to use mIRC's own default, as a person quitting would."),
+  confirm: confirmArg,
+});
+const nickSchema = z.object({
+  session: sessionArg,
+  network: networkArg,
+  nick: z.string().min(1),
+  confirm: confirmArg,
+});
 const sendSchema = z.object({
   session: sessionArg,
   network: networkArg,
@@ -267,6 +331,8 @@ type EnsureConnectedArgs = z.infer<typeof ensureConnectedSchema>;
 type JoinArgs = z.infer<typeof joinSchema>;
 type EnsureJoinedArgs = z.infer<typeof ensureJoinedSchema>;
 type PartArgs = z.infer<typeof partSchema>;
+type DisconnectArgs = z.infer<typeof disconnectSchema>;
+type NickArgs = z.infer<typeof nickSchema>;
 type SendArgs = z.infer<typeof sendSchema>;
 type NotifyArgs = z.infer<typeof notifySchema>;
 type WaitArgs = z.infer<typeof waitSchema>;
@@ -381,14 +447,21 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     {
       description:
         "What mIRC is doing now: networks, connection status, our nick, joined channels and " +
-        "member counts. Call this before acting to avoid reconnecting or rejoining needlessly.",
+        "member counts. Call this before acting to avoid reconnecting or rejoining needlessly. " +
+        "`openedByAgent` and `joinedByAgent` mark what the agent may leave on its own; " +
+        "everything else is the user's. `renamed` shows a nick change, e.g. by NickServ.",
       inputSchema: getStateSchema.shape,
     },
     ({ session, network }: GetStateArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
         await freshen(s, stateFreshnessMs);
-        const networks = network ? [s.state.resolve(network)] : s.state.networks();
+        const picked = network ? [s.state.resolve(network)] : s.state.networks();
+        const networks = picked.map((n) => ({
+          ...n,
+          openedByAgent: s.owned.ownsConnection(n.cid),
+          joinedByAgent: n.channels.filter((c) => s.owned.ownsChannel(n.cid, c)),
+        }));
         return json({ networks, lastRefreshTs: s.state.lastRefreshTs });
       }),
   );
@@ -495,6 +568,8 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     const error = await s.refreshState();
     if (error) return failure(error);
     const cid = typeof outcome.data?.cid === "number" ? outcome.data.cid : undefined;
+    // A receipt: this connection is the agent's to close again.
+    if (cid !== undefined) s.owned.openedConnection(cid);
     const network = cid === undefined ? undefined : s.state.byCid(cid);
     return json({ skipped: false, network });
   }
@@ -575,7 +650,9 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         const outcome = await s.commands.send("join", { cid: net.cid, channel, key }, {
           context: "join",
         });
-        if (!outcome.ok) return failure(outcome.error);
+        if (!outcome.ok) return failure(explainJoinRefusal(outcome.error, net));
+        // Only a real join earns a receipt: "already" means it was in there before.
+        if (outcome.data?.already !== true) s.owned.joinedChannel(net.cid, channel);
 
         const members = typeof outcome.data?.members === "number"
           ? outcome.data.members
@@ -608,7 +685,8 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         const outcome = await s.commands.send("join", { cid: net.cid, channel }, {
           context: "join",
         });
-        if (!outcome.ok) return failure(outcome.error);
+        if (!outcome.ok) return failure(explainJoinRefusal(outcome.error, net));
+        if (outcome.data?.already !== true) s.owned.joinedChannel(net.cid, channel);
         const members = typeof outcome.data?.members === "number"
           ? outcome.data.members
           : s.state.memberCount(net, channel);
@@ -625,14 +703,75 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
   tool(
     "irc_part",
     {
-      description: "Leave a channel.",
+      description:
+        "Leave a channel. Free for channels the agent joined itself; the user's own channels " +
+        "need confirm: true, only when the user asked.",
       inputSchema: partSchema.shape,
     },
-    ({ session, network, channel }: PartArgs) =>
+    ({ session, network, channel, confirm }: PartArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
         const net = await targetOf(s, network, stateFreshnessMs);
+        if (!s.owned.ownsChannel(net.cid, channel) && confirm !== true) {
+          return usersOwn(channel, net);
+        }
         return fromOutcome(await s.commands.send("part", { cid: net.cid, channel }));
+      }),
+  );
+
+  tool(
+    "irc_disconnect",
+    {
+      description:
+        "Disconnect from a network. Free for connections the agent opened itself; the user's " +
+        "own connections need confirm: true, only when the user asked. Quits with mIRC's own " +
+        "default message unless one is given, so it looks like a person quitting.",
+      inputSchema: disconnectSchema.shape,
+    },
+    ({ session, network, message, confirm }: DisconnectArgs) =>
+      guarded(async () => {
+        const s = sessionOf(registry, session);
+        const net = await targetOf(s, network, stateFreshnessMs);
+        if (!s.owned.ownsConnection(net.cid) && confirm !== true) {
+          return usersOwn("This connection", net);
+        }
+        if (net.status === "disconnected") {
+          return json({ skipped: true, reason: "already disconnected", network: net });
+        }
+        const outcome = await s.commands.send("disconnect", { cid: net.cid, message }, {
+          timeoutMs: 15_000,
+        });
+        if (!outcome.ok) return failure(outcome.error);
+        const error = await s.refreshState();
+        if (error) return failure(error);
+        return json({ ok: true, network: s.state.byCid(net.cid) ?? null });
+      }),
+  );
+
+  tool(
+    "irc_nick",
+    {
+      description:
+        "Change our nick on one network, e.g. after NickServ renamed us to a Guest nick. Free on " +
+        "connections the agent opened; on the user's own connections it needs confirm: true, " +
+        "only when the user asked. Waits for the server to accept or refuse it.",
+      inputSchema: nickSchema.shape,
+    },
+    ({ session, network, nick, confirm }: NickArgs) =>
+      guarded(async () => {
+        const s = sessionOf(registry, session);
+        const net = await targetOf(s, network, stateFreshnessMs);
+        if (!s.owned.ownsConnection(net.cid) && confirm !== true) {
+          return usersOwn("The nick", net);
+        }
+        // Exact comparison: a change of case only is still a change the user can ask for.
+        if (net.nick === nick) {
+          return json({ skipped: true, reason: "already using that nick", nick });
+        }
+        const outcome = await s.commands.send("nick", { cid: net.cid, nick });
+        if (!outcome.ok) return failure(outcome.error);
+        const confirmed = typeof outcome.data?.nick === "string" ? outcome.data.nick : nick;
+        return json({ ok: true, network: net.name, nick: confirmed });
       }),
   );
 
@@ -857,7 +996,8 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           const joined = await s.commands.send("join", { cid: net.cid, channel }, {
             context: "join",
           });
-          if (!joined.ok) return await fail(joined.error);
+          if (!joined.ok) return await fail(explainJoinRefusal(joined.error, net));
+          if (joined.data?.already !== true) s.owned.joinedChannel(net.cid, channel);
           steps.push("joined");
         } else {
           steps.push("already joined");

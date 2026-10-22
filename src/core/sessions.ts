@@ -10,6 +10,7 @@
 import { EventBus } from "./bus.ts";
 import { EventLog, type NewEvent } from "./buffers.ts";
 import { DccTracker } from "./dcc.ts";
+import { OwnershipLedger } from "./ownership.ts";
 import { CommandDispatcher } from "./commands.ts";
 import { StateModel } from "./state.ts";
 import {
@@ -49,6 +50,8 @@ export class Session {
   readonly log: EventLog;
   readonly bus: EventBus;
   readonly dcc = new DccTracker();
+  /** What the agent opened or joined itself; see ownership.ts. */
+  readonly owned = new OwnershipLedger();
   readonly commands: CommandDispatcher;
   nick: string;
   mirc?: string;
@@ -85,6 +88,9 @@ export class Session {
     if (event.kind === "selfnick" && typeof event.extra?.new === "string" && event.extra.new) {
       this.nick = event.extra.new;
     }
+    // Before the state model, which may drop the channel; the nick is unaffected.
+    const ours = event.cid === undefined ? undefined : this.state.byCid(event.cid)?.nick;
+    this.owned.applyEvent(event, ours);
     this.state.applyEvent(event);
     this.dcc.applyEvent(event);
     this.bus.emit(event);
@@ -132,6 +138,7 @@ export class Session {
       networks.push(net);
     }
     this.state.applyStateFrame(networks);
+    this.owned.retainOnly(networks.map((n) => n.cid));
     return undefined;
   }
 

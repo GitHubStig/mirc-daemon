@@ -328,7 +328,8 @@ alias -l bridge_command {
   ; Numbers are not encoded, so the port is read with jnum.
   if (%act == connect) { bridge_do_connect %id $jparam(%f, server) $iif($jnum(%f, port), $v1, 0) $jparam(%f, password) | return }
   if (%act == raw) { bridge_do_raw %id $jparam(%f, line) | return }
-  if (%act == quit) { bridge_ok %id | quit | return }
+  if (%act == nick) { bridge_do_nick %id $jparam(%f, nick) | return }
+  if (%act == disconnect) { bridge_do_disconnect %id $jparam(%f, message) | return }
   bridge_fail %id 0 unknown-action-$+(%act)
 }
 
@@ -533,6 +534,54 @@ alias -l bridge_do_connect {
   set -e %bridge_conn_cid %new
 }
 
+; $1 = id, $2 = the new nick. Answered by our own NICK event on this
+; connection, or by the server's refusal: 432 invalid, 433 in use, 437 held
+; by the network, 438 changing too fast.
+alias -l bridge_do_nick {
+  if ($2 == $null) { bridge_fail $1 0 missing-nick | return }
+  set -e %bridge_nick_id $1
+  set -e %bridge_nick_cid $cid
+  .timerbridgenick 1 8 bridge_nick_timeout
+  nick $2
+}
+
+alias -l bridge_nick_failed {
+  ; $1 = numeric, $2- = server text
+  if (!$var(%bridge_nick_id)) return
+  if ($cid != %bridge_nick_cid) return
+  var %id = %bridge_nick_id
+  .timerbridgenick off
+  unset %bridge_nick_id %bridge_nick_cid
+  bridge_fail %id $1 $2-
+}
+
+alias bridge_nick_timeout {
+  if (!$var(%bridge_nick_id)) return
+  var %id = %bridge_nick_id
+  unset %bridge_nick_id %bridge_nick_cid
+  bridge_fail %id 0 nick-timeout
+}
+
+; $1 = id, $2- = quit message. With no message, plain /quit uses mIRC's own
+; default: nothing that reaches IRC may mark this as automated. Answered by
+; this connection's DISCONNECT. The window stays, as it does when a person
+; quits; mIRC or the user can close it.
+alias -l bridge_do_disconnect {
+  if ($status == disconnected) { bridge_ok $1 $kvo(already, true) | return }
+  set -e %bridge_quit_id $1
+  set -e %bridge_quit_cid $cid
+  .timerbridgequit 1 12 bridge_quit_timeout
+  if ($2- != $null) quit $2-
+  else quit
+}
+
+alias bridge_quit_timeout {
+  if (!$var(%bridge_quit_id)) return
+  var %id = %bridge_quit_id
+  unset %bridge_quit_id %bridge_quit_cid
+  bridge_fail %id 0 disconnect-timeout
+}
+
 alias -l bridge_do_raw {
   if (!$2-) { bridge_fail $1 0 missing-line | return }
   raw $2-
@@ -558,6 +607,12 @@ on *:DISCONNECT: {
     var %id = %bridge_conn_id
     unset %bridge_conn_id %bridge_conn_cid
     bridge_fail %id 0 connection-failed
+  }
+  if ($var(%bridge_quit_id) && $cid == %bridge_quit_cid) {
+    var %id = %bridge_quit_id
+    .timerbridgequit off
+    unset %bridge_quit_id %bridge_quit_cid
+    bridge_ok %id
   }
 }
 
@@ -589,7 +644,8 @@ raw 366:*:{
 ; The refusals IRC actually reports: 403 no such channel, 405 too many channels,
 ; 437 temporarily unavailable, 471 full, 473 invite-only, 474 banned, 475 key,
 ; 477 registered nick required, 489 TLS-only. Anything else is caught by the
-; join timer. These only act while a join is pending.
+; join timer. These only act while a join is pending. 432, 433, 437 and 438
+; also refuse a nick change, and only act while one is pending.
 ;
 ; Every specific raw handler also mirrors its line. Only the FIRST matching
 ; raw event in a script file fires, so a numeric with its own handler never
@@ -597,7 +653,10 @@ raw 366:*:{
 ; otherwise be the one it never gets.
 raw 403:*:{ bridge_mirror_raw $numeric $1- | bridge_join_failed 403 $2- }
 raw 405:*:{ bridge_mirror_raw $numeric $1- | bridge_join_failed 405 $2- }
-raw 437:*:{ bridge_mirror_raw $numeric $1- | bridge_join_failed 437 $2- }
+raw 437:*:{ bridge_mirror_raw $numeric $1- | bridge_join_failed 437 $2- | bridge_nick_failed 437 $2- }
+raw 432:*:{ bridge_mirror_raw $numeric $1- | bridge_nick_failed 432 $2- }
+raw 433:*:{ bridge_mirror_raw $numeric $1- | bridge_nick_failed 433 $2- }
+raw 438:*:{ bridge_mirror_raw $numeric $1- | bridge_nick_failed 438 $2- }
 raw 489:*:{ bridge_mirror_raw $numeric $1- | bridge_join_failed 489 $2- }
 raw 471:*:{ bridge_mirror_raw $numeric $1- | bridge_join_failed 471 $2- }
 raw 473:*:{ bridge_mirror_raw $numeric $1- | bridge_join_failed 473 $2- }
@@ -666,6 +725,12 @@ on *:CTCP:*:*: {
 on me:*:NICK: {
   if (!$sock(bridge)) return
   bridge_send $evp(selfnick) $+ $chr(44) $+ $kvo(extra, $chr(123) $+ $kvo(old, $jstr($nick)) $+ $chr(44) $+ $kvo(new, $jstr($newnick)) $+ $chr(125)) $+ $chr(125)
+  if ($var(%bridge_nick_id) && $cid == %bridge_nick_cid) {
+    var %id = %bridge_nick_id
+    .timerbridgenick off
+    unset %bridge_nick_id %bridge_nick_cid
+    bridge_ok %id $kvo(nick, $jstr($newnick))
+  }
 }
 
 on *:NICK: {

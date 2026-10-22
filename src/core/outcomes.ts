@@ -51,9 +51,23 @@ const NUMERIC_RULES: Record<number, NumericRule> = {
     code: "server_error",
     hint: () => "you have joined too many channels on this network.",
   },
+  432: {
+    code: "server_error",
+    hint: () => "the server rejected that nick as invalid (characters or length).",
+  },
   433: {
     code: "nick_in_use",
-    hint: () => "your chosen nick is already in use; mIRC will retry with a variation.",
+    hint: () => "that nick is already in use on this network; pick another.",
+  },
+  437: {
+    code: "server_error",
+    hint: () =>
+      "that nick or channel is temporarily unavailable (held by the network after recent use); " +
+      "try again later or pick another.",
+  },
+  438: {
+    code: "server_error",
+    hint: () => "the server says nick changes are too fast; wait a little and try again.",
   },
   464: { code: "connect_failed", hint: () => "the server rejected the password for this network." },
   465: { code: "connect_failed", hint: () => "you are banned from this server." },
@@ -126,6 +140,16 @@ const ERR_TOKENS: Record<string, { code: ErrorCode; hint: string }> = {
       "server sent a refusal mIRC does not recognise; check irc_read for a raw numeric.",
   },
   "ison-timeout": { code: "timeout", hint: "the server did not answer the ISON query." },
+  "nick-timeout": {
+    code: "timeout",
+    hint: "the server never confirmed the nick change. Check irc_get_state for the current nick.",
+  },
+  "disconnect-timeout": {
+    code: "timeout",
+    hint:
+      "mIRC did not report the connection closing. Check irc_get_state before assuming either " +
+      "way.",
+  },
   "part-timeout": {
     code: "timeout",
     hint: "the server never confirmed leaving the channel. Check irc_get_state before " +

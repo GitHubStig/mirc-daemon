@@ -104,6 +104,13 @@ export interface NetworkState {
   channels: string[];
   /** Channel name → member count, as reported by the `chans` action. */
   members: Record<string, number>;
+  /**
+   * The last time our nick changed on this connection, whoever changed it: the
+   * user, an agent, or the network's services. A services rename (NickServ
+   * turning a registered nick into Guest12345) is the usual reason a channel
+   * later refuses us with 477, so the agent needs to be able to see it.
+   */
+  renamed?: { from: string; to: string; ts: number };
 }
 
 // ---------------------------------------------------------------------------
@@ -221,10 +228,8 @@ export type ActionName =
   | "whois"
   | "echo"
   | "raw"
-  | "quit";
-
-/** Actions that can change the world outside this process. Gated (§7 / ADR-0006). */
-export const GATED_ACTIONS: ReadonlySet<ActionName> = new Set<ActionName>(["raw", "quit"]);
+  | "nick"
+  | "disconnect";
 
 export interface CmdFrame {
   t: "cmd";

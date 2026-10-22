@@ -44,6 +44,11 @@ const INSTRUCTIONS = [
   "Use irc_get_state before acting to see what mIRC is already doing, and irc_wait_for",
   "rather than polling irc_read: it returns the moment a matching message arrives.",
   "Every tool reports failures as a stable code plus a plain-English hint.",
+  "",
+  "mIRC is a person's own client. Their connections and channels are theirs: you may",
+  "use them, but leave a channel, disconnect or change nick there only when they asked",
+  "(confirm: true). What you opened or joined yourself you may close freely. Never send",
+  "anything that marks the traffic as automated.",
 ].join("\n");
 
 export function startMcp(options: McpOptions): RunningMcp {

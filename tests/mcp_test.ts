@@ -620,3 +620,161 @@ Deno.test("a bot's reply only counts if it comes from the bot's own connection",
     await s.stop();
   }
 });
+
+// --- ownership: what the agent may leave on its own ---------------------------
+
+Deno.test("the user's channel is not left without confirm; with it, it is", async () => {
+  const s = await stack();
+  try {
+    // #chan is in the starting state, so the agent never joined it: the user's.
+    const refused = await s.client.callTool({ name: "irc_part", arguments: { channel: "#chan" } });
+    assertEquals(textOf(refused).startsWith("guard_denied:"), true);
+    assertEquals(textOf(refused).includes("confirm: true"), true);
+    assertEquals(s.fake.received.some((c) => c.action === "part"), false);
+
+    const confirmed = await s.client.callTool({
+      name: "irc_part",
+      arguments: { channel: "#chan", confirm: true },
+    });
+    assertEquals(confirmed.isError ?? false, false);
+    assertEquals(s.fake.received.some((c) => c.action === "part"), true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("a channel the agent joined itself can be left freely", async () => {
+  const s = await stack();
+  try {
+    // As in mIRC: our own JOIN event, then the reply.
+    s.fake.setHandler((cmd, fake) => {
+      if (cmd.action !== "join") return undefined;
+      fake.emit("join", { buf: "#bots", nick: "me" });
+      return { ok: true, data: { joined: "#bots", members: 10 }, delayMs: 20 };
+    });
+    await s.client.callTool({ name: "irc_ensure_joined", arguments: { channel: "#bots" } });
+    s.fake.setHandler(undefined);
+    const state = JSON.parse(
+      textOf(await s.client.callTool({ name: "irc_get_state", arguments: {} })),
+    );
+    // Only the channel the agent joined is marked; the user's #chan is not.
+    assertEquals(state.networks[0].joinedByAgent, ["#bots"]);
+    const left = await s.client.callTool({ name: "irc_part", arguments: { channel: "#bots" } });
+    assertEquals(left.isError ?? false, false);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("joining a channel the user is already in leaves it the user's", async () => {
+  const s = await stack();
+  try {
+    s.fake.setHandler((cmd) =>
+      cmd.action === "join"
+        ? { ok: true, data: { joined: "#chan", members: 42, already: true } }
+        : undefined
+    );
+    await s.client.callTool({ name: "irc_join", arguments: { channel: "#chan" } });
+    s.fake.setHandler(undefined);
+    const refused = await s.client.callTool({ name: "irc_part", arguments: { channel: "#chan" } });
+    assertEquals(textOf(refused).startsWith("guard_denied:"), true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("the agent's own connection can be closed; the user's needs confirm", async () => {
+  const s = await stack();
+  try {
+    growOnConnect(s, 7, "Rizon");
+    await s.client.callTool({
+      name: "irc_ensure_connected",
+      arguments: { network: "Rizon", server: "irc.rizon.net" },
+    });
+    s.fake.setHandler(undefined);
+
+    const mine = await s.client.callTool({ name: "irc_get_state", arguments: {} });
+    const flags = JSON.parse(textOf(mine)).networks.map((
+      n: { name: string; openedByAgent: boolean },
+    ) => [n.name, n.openedByAgent]);
+    assertEquals(flags.sort(), [["Rizon", true], ["net1", false]]);
+
+    const users = await s.client.callTool({
+      name: "irc_disconnect",
+      arguments: { network: "net1" },
+    });
+    assertEquals(textOf(users).startsWith("guard_denied:"), true);
+
+    const agents = await s.client.callTool({
+      name: "irc_disconnect",
+      arguments: { network: "Rizon" },
+    });
+    assertEquals(agents.isError ?? false, false);
+    const sent = s.fake.received.filter((c) => c.action === "disconnect");
+    assertEquals(sent.map((c) => c.params?.cid), [7]);
+    // No message given: none is sent, so mIRC quits with its own default.
+    assertEquals(sent[0].params?.message, undefined);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("irc_nick needs confirm on the user's connection and reports the confirmed nick", async () => {
+  const s = await stack();
+  try {
+    const refused = await s.client.callTool({ name: "irc_nick", arguments: { nick: "other" } });
+    assertEquals(textOf(refused).startsWith("guard_denied:"), true);
+
+    s.fake.setHandler((cmd) =>
+      cmd.action === "nick" ? { ok: true, data: { nick: "other" } } : undefined
+    );
+    const body = JSON.parse(textOf(
+      await s.client.callTool({ name: "irc_nick", arguments: { nick: "other", confirm: true } }),
+    ));
+    assertEquals(body.nick, "other");
+
+    s.fake.setHandler((cmd) =>
+      cmd.action === "nick"
+        ? { ok: false, numeric: 433, err: "other Nickname is already in use" }
+        : undefined
+    );
+    const taken = await s.client.callTool({
+      name: "irc_nick",
+      arguments: { nick: "taken", confirm: true },
+    });
+    assertEquals(textOf(taken).startsWith("nick_in_use:"), true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("a 477 refusal after a services rename tells the agent what to tell the user", async () => {
+  const s = await stack();
+  try {
+    // NickServ renamed us, as Rizon did live.
+    s.fake.emit("selfnick", { extra: { old: "me", new: "Guest28669" } });
+    await until(() => s.mirc.registry.resolve()!.state.resolve().nick === "Guest28669", {
+      label: "rename applied",
+    });
+    s.fake.setHandler((cmd) =>
+      cmd.action === "join"
+        ? { ok: false, numeric: 477, err: "#locked Cannot join channel (+r)" }
+        : undefined
+    );
+    const result = await s.client.callTool({ name: "irc_join", arguments: { channel: "#locked" } });
+    const text = textOf(result);
+    assertEquals(text.startsWith("join_failed:"), true);
+    assertEquals(text.includes('"Guest28669"'), true);
+    assertEquals(text.includes('renamed you from "me"'), true);
+    assertEquals(text.includes("irc_nick"), true);
+    assertEquals(text.includes("Tell the user"), true);
+
+    // And the rename is visible in state, surviving a refresh.
+    const state = JSON.parse(
+      textOf(await s.client.callTool({ name: "irc_get_state", arguments: {} })),
+    );
+    assertEquals(state.networks[0].renamed.to, "Guest28669");
+  } finally {
+    await s.stop();
+  }
+});

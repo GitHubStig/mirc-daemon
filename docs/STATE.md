@@ -18,7 +18,7 @@ Proven by running it, with evidence in the log:
   daemon's state model then holds the network, the joined channel and member counts.
 - **Daemon runs**: `deno task start` binds `127.0.0.1:8686` (mIRC, raw TCP) and `127.0.0.1:8687`
   (agents, HTTP). `/health` is unauthenticated, `/status` and `/mcp` require the bearer token.
-- **182 automated tests** (`deno task test`): MBP framing including CRLF and oversize rejection,
+- **194 automated tests** (`deno task test`): MBP framing including CRLF and oversize rejection,
   logging with redaction, the state model, the event log and waits, credit-limited command dispatch,
   the failure taxonomy, DCC outcome tracking, the listener, config, the INI reader, the HTTP door,
   the 20-tool MCP surface driven by the SDK's own client, and the frame shapes `bridge.mrc` emits
@@ -90,11 +90,26 @@ Proven by running it, with evidence in the log:
 
 Assumed or untested. Treat these as the actual risk surface.
 
-The one remaining live check:
+**Phase 2 (ownership, `irc_disconnect`, `irc_nick`, ADR-0012) has never run in mIRC.** Accept mIRC's
+reload prompt for `bridge.mrc`, then:
+
+1. `irc_get_state` shows `openedByAgent: false` on EFnet and `joinedByAgent` without `#home!`.
+   `irc_part #home!` without `confirm` is refused as `guard_denied`, and nothing is sent.
+2. Open Rizon (`irc_ensure_connected`), join an empty test channel, then `irc_part` it: allowed
+   without `confirm`.
+3. `irc_nick` on Rizon to an unregistered nick (it is the agent's connection, so no `confirm`).
+   Answered by the server's confirmation, and the state shows the new nick. Then a taken nick:
+   `nick_in_use`, from the server's 433.
+4. `irc_disconnect` Rizon: answered by its DISCONNECT. Channels quit with mIRC's **own default
+   message**; check that it says nothing about a daemon.
+5. Closing an agent-opened connection's window in mIRC drops its receipt on the next refresh.
+
+Carried over:
 
 1. `irc_join` on a channel that refuses you fails with a code within 8s, **and** the refusal also
    appears as a raw event. This needs a `+i` or `+k` channel held by someone else: they
-   `/join #some-test`, `/mode #some-test +i`, and stay in it.
+   `/join #some-test`, `/mode #some-test +i`, and stay in it. With a 477 refusal, also check that
+   the hint names the current nick and any services rename.
 
 Beyond those:
 
@@ -182,10 +197,8 @@ In mIRC: `/load -rs bridge.mrc` then `/bridge.start`. Available while debugging:
 
 ## Next, in order
 
-1. **The refused-join check** under "Not verified", when someone can hold a `+i` channel.
-2. **Multi-connection phase 2: ownership** (ADR-0012). An in-memory record of what the agent opened
-   and joined. `irc_part` and a new `irc_disconnect` work freely on those and need `confirm: true`
-   on the user's.
+1. **Verify phase 2 live**, using the checklist under "Not verified".
+2. **The refused-join check**, when someone can hold a `+i` channel.
 3. **Multi-connection phase 3: XDCC start**: recognise the bot's `DCC SEND` offer, and report
    `$sreq` honestly (auto, ask or ignore).
 4. **XDCC end-to-end** against a real bot on another network, with EFNet left untouched.
