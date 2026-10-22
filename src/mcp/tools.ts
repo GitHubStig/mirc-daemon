@@ -16,6 +16,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
+  ACTIVE_DCC_STATES,
   type BridgeError,
   bridgeError,
   type BridgeEvent,
@@ -30,6 +31,7 @@ import type { Session, SessionRegistry } from "../core/sessions.ts";
 import { emptyChannelWarning } from "../core/outcomes.ts";
 import { waitForEvent, type WaitMatcher } from "../core/waits.ts";
 import { classifyBotReply } from "../core/xdcc.ts";
+import { describeDownload } from "../core/dcc.ts";
 import type { LogSink } from "../core/log.ts";
 
 export interface ToolOptions {
@@ -352,6 +354,7 @@ const jobArg = z
   .optional()
   .describe("A job id from xdcc_fetch, e.g. dcc3. Omit for the most recent active one.");
 const dccStatusSchema = z.object({ session: sessionArg, job: jobArg });
+const xdccCancelSchema = z.object({ session: sessionArg, job: jobArg, confirm: confirmArg });
 const dccWatchSchema = z.object({
   session: sessionArg,
   job: jobArg,
@@ -409,6 +412,7 @@ type DccStatusArgs = z.infer<typeof dccStatusSchema>;
 type DccWatchArgs = z.infer<typeof dccWatchSchema>;
 type XdccListArgs = z.infer<typeof xdccListSchema>;
 type XdccFetchArgs = z.infer<typeof xdccFetchSchema>;
+type XdccCancelArgs = z.infer<typeof xdccCancelSchema>;
 type RawArgs = z.infer<typeof rawSchema>;
 
 export function registerTools(server: McpServer, options: ToolOptions): void {
@@ -990,7 +994,11 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         if (job !== undefined) {
           const found = s.dcc.get(job);
           if (!found) return failure(bridgeError("dcc_failed", `no DCC job named "${job}".`));
-          return json({ job: found, mircAccepts: s.sreq ?? null });
+          return json({
+            job: found,
+            downloading: describeDownload(found) ?? null,
+            mircAccepts: s.sreq ?? null,
+          });
         }
         return json({
           jobs: s.dcc.list(),
@@ -1029,8 +1037,74 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           changed,
           from,
           job: target,
+          downloading: describeDownload(target) ?? null,
           ...(changed ? {} : { note: "no change yet; call again to keep waiting" }),
         });
+      }),
+  );
+
+  tool(
+    "xdcc_cancel",
+    {
+      description:
+        "Stop an XDCC request or transfer, e.g. when the file is not what the user wanted. " +
+        "Queued or waiting: asks the bot to drop it (XDCC REMOVE / XDCC CANCEL, as a person " +
+        "would type). Transferring: also closes mIRC's download. Jobs the agent started need no " +
+        "confirmation; a transfer the user started themselves needs confirm: true. Only when " +
+        "the user asked, or the file is clearly not what they asked for.",
+      inputSchema: xdccCancelSchema.shape,
+    },
+    ({ session, job, confirm }: XdccCancelArgs) =>
+      guarded(async () => {
+        const s = sessionOf(registry, session);
+        const target = job !== undefined ? s.dcc.get(job) : s.dcc.active().at(-1);
+        if (!target) {
+          return failure(
+            bridgeError(
+              "dcc_failed",
+              job !== undefined ? `no DCC job named "${job}".` : "there is no active DCC job.",
+            ),
+          );
+        }
+        if (!ACTIVE_DCC_STATES.has(target.state)) {
+          return json({ skipped: true, reason: `already ${target.state}`, job: target });
+        }
+        const bot = target.requestedBy?.bot;
+        if (!bot && confirm !== true) {
+          return failure(
+            bridgeError(
+              "guard_denied",
+              "that transfer was not started by the agent; it belongs to the user. Only stop " +
+                "it if the user explicitly asked; then repeat the call with confirm: true.",
+            ),
+          );
+        }
+        const steps: string[] = [];
+        const cid = target.cid;
+        const wasState = target.state;
+        // Record the cancel BEFORE acting, in the same synchronous step as the
+        // state check above. Closing mIRC's download makes it report GETFAIL,
+        // and live it did so 135 ms later, before even acknowledging the close;
+        // marked first, that failure is recognised as this cancel. Nothing can
+        // finish the job between the check and this line.
+        s.dcc.cancel(target, "cancelled on request");
+        if (bot && cid !== undefined) {
+          // What a person types: REMOVE leaves the queue, CANCEL stops a send.
+          const words = wasState === "queued" ? "XDCC REMOVE" : "XDCC CANCEL";
+          const told = await s.commands.send("msg", { cid, target: bot, text: words }, {
+            context: "message",
+          });
+          steps.push(told.ok ? `told ${bot}: ${words}` : `could not tell ${bot}`);
+        }
+        if (wasState === "offered") {
+          // The transfer may already be running in mIRC; close its download.
+          const nick = bot ?? target.sender;
+          if (nick) {
+            const closed = await s.commands.send("dccstop", { cid, nick });
+            steps.push(closed.ok ? "closed mIRC's download" : "could not close mIRC's download");
+          }
+        }
+        return json({ cancelled: true, steps, job: target });
       }),
   );
 
@@ -1230,7 +1304,21 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
             "keeps listening."
           : `No answer from ${bot} yet. Busy bots can take minutes; the job keeps listening, ` +
             "so check back with irc_dcc_watch rather than asking again.";
-        return json({ job, steps, mircAccepts: s.sreq ?? null, next });
+        const downloading = describeDownload(job);
+        return json({
+          ...(downloading
+            ? {
+              downloading,
+              tellTheUser: `Tell the user ${downloading} is what ${bot} is sending, so they can ` +
+                "confirm it is what they wanted. Pack numbers from websites go stale; if this is " +
+                `the wrong file, stop it with xdcc_cancel {job: "${job.id}"}.`,
+            }
+            : {}),
+          job,
+          steps,
+          mircAccepts: s.sreq ?? null,
+          next,
+        });
       }),
   );
 

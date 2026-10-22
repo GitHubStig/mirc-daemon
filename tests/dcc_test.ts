@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { DccTracker } from "../src/core/dcc.ts";
+import { DccTracker, describeDownload, humanSize } from "../src/core/dcc.ts";
 import type { BridgeEvent } from "../src/core/types.ts";
 
 function dccEvent(event: string, extra: Record<string, unknown> = {}, net = "net1"): BridgeEvent {
@@ -200,4 +200,59 @@ Deno.test("an offer nobody asked for is still tracked", () => {
   assertEquals(job?.state, "offered");
   assertEquals(job?.file, "gift.txt");
   assertEquals(job?.requestedBy, undefined);
+});
+
+// --- naming the download, and cancelling -----------------------------------------
+
+Deno.test("mIRC's full saved path becomes savedAs; the file keeps its plain name", () => {
+  const tracker = new DccTracker();
+  const job = tracker.start({ cid: 7, net: "Rizon", bot: "Bot", pack: "1" });
+  // The shape seen live: $filename is the full path.
+  tracker.applyEvent(
+    dccEvent("complete", { file: String.raw`D:\Downloads\me\dcc-test.txt`, from: "Bot" }, "Rizon"),
+  );
+  assertEquals(job.file, "dcc-test.txt");
+  assertEquals(job.savedAs, String.raw`D:\Downloads\me\dcc-test.txt`);
+});
+
+Deno.test("the failure from closing a cancelled download stays on the cancelled job", () => {
+  const tracker = new DccTracker();
+  const job = tracker.start({ cid: 7, net: "Rizon", bot: "Bot", pack: "1" });
+  tracker.applyEvent(
+    from("ctcp", { buf: undefined, extra: { ctcp: "DCC", text: "SEND wrong.iso 1 2 300" } }),
+  );
+  tracker.cancel(job, "cancelled on request");
+  tracker.applyEvent(
+    dccEvent("getfail", { file: String.raw`D:\dl\wrong.iso`, from: "Bot" }, "Rizon"),
+  );
+  assertEquals(job.state, "cancelled");
+  assertEquals(job.savedAs, String.raw`D:\dl\wrong.iso`);
+  // No anonymous "failed" job appears for it.
+  assertEquals(tracker.list().length, 1);
+});
+
+Deno.test("describeDownload names the pack, file and size for the user", () => {
+  const tracker = new DccTracker();
+  const job = tracker.start({ cid: 7, net: "Rizon", bot: "Bot", pack: "#6" });
+  assertEquals(describeDownload(job), undefined);
+  tracker.applyEvent(
+    from("ctcp", {
+      buf: undefined,
+      extra: { ctcp: "DCC", text: "SEND debian-12.iso 1 2 661651456" },
+    }),
+  );
+  assertEquals(describeDownload(job), 'pack #6 is "debian-12.iso" (631.0 MB)');
+  assertEquals(humanSize(83), "83 B");
+});
+
+Deno.test("an unrequested transfer remembers who sent it", () => {
+  const tracker = new DccTracker();
+  const job = tracker.applyEvent(
+    from("ctcp", {
+      nick: "Friend",
+      buf: undefined,
+      extra: { ctcp: "DCC", text: "SEND a.txt 1 2 3" },
+    }),
+  );
+  assertEquals(job?.sender, "Friend");
 });

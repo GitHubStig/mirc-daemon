@@ -18,7 +18,7 @@ Proven by running it, with evidence in the log:
   daemon's state model then holds the network, the joined channel and member counts.
 - **Daemon runs**: `deno task start` binds `127.0.0.1:8686` (mIRC, raw TCP) and `127.0.0.1:8687`
   (agents, HTTP). `/health` is unauthenticated, `/status` and `/mcp` require the bearer token.
-- **218 automated tests** (`deno task test`): MBP framing including CRLF and oversize rejection,
+- **226 automated tests** (`deno task test`): MBP framing including CRLF and oversize rejection,
   logging with redaction, the state model, the event log and waits, credit-limited command dispatch,
   the failure taxonomy, DCC outcome tracking, the listener, config, the INI reader, the HTTP door,
   the 20-tool MCP surface driven by the SDK's own client, and the frame shapes `bridge.mrc` emits
@@ -118,6 +118,21 @@ Proven by running it, with evidence in the log:
   - **`on CONNECTFAIL` does not fire** in 7.85: not for timeouts, not for ten instant certificate
     failures. A connect to an unreachable server therefore ends in the 60 s timeout, whose hint
     names the agent's window to stop. The handler is kept because it is harmless.
+- **DCC, end to end, by self-send** (2026-10-22). The user sent files from their EFNet connection to
+  an agent-opened second one (`` me2 ``, `cid 1751`).
+  - First, nothing arrived at all. Three handlers had the wrong event syntax and had never fired in
+    any session: `on *:CTCP:*:*:` (mIRC's form is `ctcp *:*:*:`), and `on *:FILERCVD:` and
+    `on *:GETFAIL:` (both need a filename field: `on *:GETFAIL:*:`). 1,333 frames over two days held
+    not one CTCP or DCC event. These are traps 15 and 16 below.
+  - Once fixed: the **offer** arrives as CTCP `DCC SEND <file> <ip> <port> <size>`, and becomes an
+    `offered` job with name and size. **`FILERCVD`** fired 107 ms later on success, closing the job
+    `complete`. **`GETFAIL`** fired when a get could not connect (mIRC was advertising the public IP
+    to itself), closing it `failed` after 21 s. `$filename` is the **full saved path**, now
+    `savedAs`, with `file` kept as the plain name. `$nick` is the sender, and `$cid` is right.
+  - **Cancel**: `xdcc_cancel` on a running 300 MB `.iso` closed mIRC's download (`/close -g`) 6 ms
+    after the offer. mIRC reported the abort as `GETFAIL` 135 ms later, before acknowledging the
+    close, and the job ended `cancelled` with the path recorded. The cancel is now recorded before
+    acting, so that abort is always recognised as ours.
 
 ## Not verified
 
@@ -135,23 +150,16 @@ Carried over:
    `/join #some-test`, `/mode #some-test +i`, and stay in it. With a 477 refusal, also check that
    the hint names the current nick and any services rename.
 
-**XDCC end-to-end (phase 3) has never seen a real transfer.** The next live run is a Linux
-distribution bot: `irc.williamgattone.it` with `tls: true` (its certificate does not verify, so the
-user has turned on mIRC's "accept invalid certificates"), `#William&Gattone`, bot `WG|LinuxOs|01`,
-pack #1. First confirm the pack is a Linux image (from the list, or the bot's "Sending you pack"
-reply). Then check:
+**XDCC against a real bot has still not completed a transfer.** The Linux bot on
+`irc.williamgattone.it` (TLS works; its certificate does not verify) proved `&` channels and `|`
+nicks. But its packs are listed only behind a website banner, on a network that also distributes
+pirated games and films, so pack #1 could not be confirmed and was not requested. The DCC machinery
+itself is now proven by self-send (see Verified). What remains for a bot is only the bot's side: its
+reply moving the job to `queued` or straight to the offer, against a bot whose packs can be checked
+over IRC.
 
-1. Joining a channel whose name contains `&`, and messaging a nick containing `|` (mSL's command
-   separator), both work.
-2. The bot's reply moves the job: `queued` with a position, or straight to the offer.
-3. **Does mIRC pass the `DCC SEND` offer to the script's `on CTCP`?** If it does, the job goes to
-   `offered` with the file and size. If it does not, the job stays `requested` until `FILERCVD`.
-   Then the offer needs another source (e.g. `on *:CTCP:DCC SEND*` or a raw handler).
-4. With `sreq: auto`, the transfer starts unattended, and `FILERCVD` settles the job as `complete`.
-   This also answers which identifiers it populates (`$filename`, `$nick`).
-5. **DCC recon**: cancel a second transfer part-way. Does `GETFAIL` fire, and with what? The
-   decisive case remains whether it fires when a transfer stalls _without_ the connection breaking.
-   If it does not, the liveness-only stall check described in ADR-0010 is needed.
+Still open from DCC recon: does `GETFAIL` fire when a transfer stalls _without_ the connection
+breaking? If not, the liveness-only stall check described in ADR-0010 is needed.
 
 Beyond those:
 
@@ -161,6 +169,16 @@ Beyond those:
   to its request. And events while the bridge link is down are dropped, because mSL does not queue
   them, by design. The daemon is not expected to restart once stable, rereading its own log could
   pick up stale entries, and mSL stays simple.
+- **A bridge reconnect starts a fresh session, and loses more than a daemon restart would suggest.**
+  Seen live: during a wait, the bridge reconnected (`s1` → `s2`, after accepting a reload prompt).
+  The pending `irc_wait_for` stayed attached to the dead session and missed the offer on the new
+  one. DCC jobs and ownership receipts live in the session too, so they are lost on any bridge
+  reconnect, not just a daemon restart. **Proposed, for review:** keep jobs and receipts per daemon
+  rather than per bridge socket, and end waits early with a clear "mIRC's link dropped; call again"
+  when their session closes.
+- **mIRC's DCC ignore list rejects some files silently.** A `.bin` offer was blocked by the user's
+  ignore list (a mIRC popup). The daemon sees the offer but no transfer and no failure, so the job
+  stays `offered`. Typical XDCC files (`.mkv`, `.iso`, `.zip`) are not on the default list.
 
 ## Traps that all failed silently
 
@@ -211,6 +229,12 @@ Found by the live run, invisible to every test because the test double was shape
     conditions positively (`$var(%x) && $istok(...)`).
 14. **`/part` returns before the server confirms.** Replying at once let a join sent straight after
     it find us still in the channel and skip the join. A part is answered on our own `PART` event.
+15. **CTCP handlers are `ctcp …`, not `on …:CTCP`.** `on *:CTCP:*:*:` loads without complaint and
+    never fires. The form is `ctcp <level>:<match>:<*|#|?>:`, like `raw`. Every CTCP, the DCC offer
+    included, was silently lost from the first version on.
+16. **`FILERCVD` and `GETFAIL` need a filename field.** `on *:GETFAIL:` also loads and never fires.
+    It is `on *:GETFAIL:*:`. When writing any mIRC event header, check its exact field list; a
+    missing field is not an error, just silence.
 
 ## Running it
 

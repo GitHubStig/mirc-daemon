@@ -1139,3 +1139,138 @@ Deno.test("a connect that fails still leaves the agent owning the window it open
     await s.stop();
   }
 });
+
+// --- what is being downloaded, and stopping it ----------------------------------
+
+Deno.test("xdcc_fetch tells the user which file the pack actually is", async () => {
+  const s = await stack();
+  try {
+    s.fake.setHandler((cmd, fake) => {
+      if (cmd.action === "members") return { ok: true, data: { count: 50, present: true } };
+      if (cmd.action === "msg") {
+        setTimeout(() =>
+          fake.emit("ctcp", {
+            nick: "Bot",
+            extra: { ctcp: "DCC", text: "SEND not-what-you-wanted.mkv 3232235777 5000 734003200" },
+          }), 30);
+      }
+      return undefined;
+    });
+    const body = JSON.parse(textOf(
+      await s.client.callTool({
+        name: "xdcc_fetch",
+        arguments: { channel: "#chan", bot: "Bot", pack: "1", timeoutMs: 3000 },
+      }),
+    ));
+    assertEquals(body.downloading, 'pack #1 is "not-what-you-wanted.mkv" (700.0 MB)');
+    assertEquals(body.tellTheUser.includes("xdcc_cancel"), true);
+    assertEquals(body.tellTheUser.includes(body.job.id), true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("xdcc_cancel: queued asks the bot to REMOVE; transferring CANCELs and closes it", async () => {
+  const s = await stack();
+  try {
+    const session = s.mirc.registry.resolve()!;
+    const queued = session.dcc.start({ cid: 1, net: "net1", bot: "Bot", pack: "1" });
+    session.dcc.applyEvent({
+      seq: 1,
+      ts: Date.now(),
+      kind: "notice",
+      cid: 1,
+      net: "net1",
+      buf: "Bot",
+      nick: "Bot",
+      text: "** You have been queued in position 3",
+    });
+    const q = JSON.parse(textOf(
+      await s.client.callTool({ name: "xdcc_cancel", arguments: { job: queued.id } }),
+    ));
+    assertEquals(q.job.state, "cancelled");
+    assertEquals(s.fake.received.filter((c) => c.action === "msg").map((c) => c.params?.text), [
+      "XDCC REMOVE",
+    ]);
+
+    const sending = session.dcc.start({ cid: 1, net: "net1", bot: "Bot", pack: "2" });
+    session.dcc.applyEvent({
+      seq: 2,
+      ts: Date.now(),
+      kind: "ctcp",
+      cid: 1,
+      net: "net1",
+      nick: "Bot",
+      extra: { ctcp: "DCC", text: "SEND b.iso 1 2 10" },
+    });
+    await s.client.callTool({ name: "xdcc_cancel", arguments: { job: sending.id } });
+    assertEquals(
+      s.fake.received.filter((c) => c.action === "msg").at(-1)?.params?.text,
+      "XDCC CANCEL",
+    );
+    const stop = s.fake.received.find((c) => c.action === "dccstop");
+    assertEquals(stop?.params?.nick, "Bot");
+    assertEquals(sending.state, "cancelled");
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("xdcc_cancel on a transfer the user started needs confirm", async () => {
+  const s = await stack();
+  try {
+    const session = s.mirc.registry.resolve()!;
+    const theirs = session.dcc.applyEvent({
+      seq: 1,
+      ts: Date.now(),
+      kind: "ctcp",
+      cid: 1,
+      net: "net1",
+      nick: "Friend",
+      extra: { ctcp: "DCC", text: "SEND theirs.zip 1 2 10" },
+    })!;
+    const refused = await s.client.callTool({ name: "xdcc_cancel", arguments: { job: theirs.id } });
+    assertEquals(textOf(refused).startsWith("guard_denied:"), true);
+    const allowed = await s.client.callTool({
+      name: "xdcc_cancel",
+      arguments: { job: theirs.id, confirm: true },
+    });
+    assertEquals(allowed.isError ?? false, false);
+    assertEquals(s.fake.received.find((c) => c.action === "dccstop")?.params?.nick, "Friend");
+    // Nothing was said to the sender: the user's own transfer, not a bot request.
+    assertEquals(s.fake.received.some((c) => c.action === "msg"), false);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("xdcc_cancel: mIRC reporting the abort before acknowledging it still ends cancelled", async () => {
+  // The order seen live: dccstop sent, GETFAIL for the closed download, then the ok.
+  const s = await stack();
+  try {
+    const session = s.mirc.registry.resolve()!;
+    const saved = String.raw`D:\Downloads\x\big.iso`;
+    s.fake.setHandler((cmd, fake) => {
+      if (cmd.action !== "dccstop") return undefined;
+      fake.emit("dcc", { cid: 1, extra: { event: "getfail", file: saved, from: "Friend" } });
+      return { ok: true, delayMs: 20 };
+    });
+    const job = session.dcc.applyEvent({
+      seq: 1,
+      ts: Date.now(),
+      kind: "ctcp",
+      cid: 1,
+      net: "net1",
+      nick: "Friend",
+      extra: { ctcp: "DCC", text: "SEND big.iso 1 2 314572800" },
+    })!;
+    await s.client.callTool({ name: "xdcc_cancel", arguments: { job: job.id, confirm: true } });
+    await until(() => job.savedAs !== undefined, { label: "getfail absorbed" });
+    assertEquals(job.state, "cancelled");
+    assertEquals(job.savedAs, saved);
+    // The abort did not turn into a separate failed job.
+    assertEquals(session.dcc.list().length, 1);
+  } finally {
+    await s.stop();
+  }
+});

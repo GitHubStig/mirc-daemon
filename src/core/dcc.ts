@@ -139,9 +139,20 @@ export class DccTracker {
     const state = outcomeState(event);
     if (!state) return undefined;
     const from = typeof event.extra?.from === "string" ? event.extra.from : undefined;
-    const file = typeof event.extra?.file === "string" && event.extra.file.length > 0
+    // mIRC's $filename here is the full saved path (seen live:
+    // D:\Downloads\<nick>\dcc-test.txt). The name is what identifies the file.
+    const savedAs = typeof event.extra?.file === "string" && event.extra.file.length > 0
       ? event.extra.file
       : undefined;
+    const file = savedAs === undefined ? undefined : baseName(savedAs);
+
+    // Closing the download window to cancel makes mIRC report a failure; that
+    // belongs to the job just cancelled, not to a new one.
+    const cancelled = this.#recentlyCancelled(from, file);
+    if (cancelled) {
+      if (savedAs) cancelled.savedAs = savedAs;
+      return cancelled;
+    }
 
     const job = this.#activeFrom(event.cid, from) ??
       this.#activeFrom(undefined, from) ??
@@ -152,6 +163,7 @@ export class DccTracker {
     this.#move(job, state);
     job.endedTs = Date.now();
     if (file) job.file = file;
+    if (savedAs) job.savedAs = savedAs;
     const size = event.extra?.size;
     if (typeof size === "number") job.size = size;
     const reason = event.extra?.reason;
@@ -162,6 +174,30 @@ export class DccTracker {
       ? secs
       : Math.max(0, Math.round((job.endedTs - job.startedTs) / 1000));
     return job;
+  }
+
+  /**
+   * Mark a job cancelled. The caller has already told the bot and closed the
+   * transfer; this records it, so the failure mIRC reports for the closed
+   * window lands here rather than on another job.
+   */
+  cancel(job: DccJob, detail: string): void {
+    this.#move(job, "cancelled");
+    job.endedTs = Date.now();
+    job.detail = detail;
+  }
+
+  /** A job cancelled in the last minute whose late outcome this could be. */
+  #recentlyCancelled(from: string | undefined, file: string | undefined): DccJob | undefined {
+    const cutoff = Date.now() - 60_000;
+    for (let i = this.#jobs.length - 1; i >= 0; i--) {
+      const job = this.#jobs[i];
+      if (job.state !== "cancelled" || (job.endedTs ?? 0) < cutoff) continue;
+      const sameSender = from !== undefined && sameNick(job.requestedBy?.bot, from);
+      const sameFile = file !== undefined && job.file === file;
+      if (sameSender || sameFile) return job;
+    }
+    return undefined;
   }
 
   /** The newest active job requested from `nick`, on `cid` when given. */
@@ -187,6 +223,9 @@ export class DccTracker {
       startedTs: event.ts,
       updatedTs: event.ts,
     };
+    const sender = event.nick ??
+      (typeof event.extra?.from === "string" ? event.extra.from : undefined);
+    if (sender) job.sender = sender;
     this.#remember(job);
     return job;
   }
@@ -224,6 +263,36 @@ export class DccTracker {
   latest(): DccJob | undefined {
     return this.#jobs.at(-1);
   }
+}
+
+/** The last path component, for either separator. */
+function baseName(path: string): string {
+  return path.split(/[\\/]/).pop() || path;
+}
+
+/** "1.2 GB", for telling a person what is being downloaded. */
+export function humanSize(bytes: number | undefined): string | undefined {
+  if (bytes === undefined) return undefined;
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${unit === 0 ? value : value.toFixed(1)} ${units[unit]}`;
+}
+
+/**
+ * One line naming what a job is downloading, for the agent to show the user.
+ * The pack number came from somewhere (often a website) that may be out of
+ * date, so the file the bot actually offers is what the user should confirm.
+ */
+export function describeDownload(job: DccJob): string | undefined {
+  if (!job.file) return undefined;
+  const size = humanSize(job.size);
+  const pack = job.requestedBy?.pack ? `pack #${job.requestedBy.pack.replace(/^#/, "")} is ` : "";
+  return `${pack}"${job.file}"${size ? ` (${size})` : ""}`;
 }
 
 function isActive(job: DccJob): boolean {

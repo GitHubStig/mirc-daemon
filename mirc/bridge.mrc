@@ -332,6 +332,7 @@ alias -l bridge_command {
   if (%act == raw) { bridge_do_raw %id $jparam(%f, line) | return }
   if (%act == nick) { bridge_do_nick %id $jparam(%f, nick) | return }
   if (%act == disconnect) { bridge_do_disconnect %id $jparam(%f, message) | return }
+  if (%act == dccstop) { bridge_do_dccstop %id $jparam(%f, nick) | return }
   bridge_fail %id 0 unknown-action-$+(%act)
 }
 
@@ -602,6 +603,18 @@ alias bridge_quit_timeout {
   var %id = %bridge_quit_id
   unset %bridge_quit_id %bridge_quit_cid
   bridge_fail %id 0 disconnect-timeout
+}
+
+; $1 = id, $2 = the sender's nick. Closing mIRC's DCC get window(s) from that
+; nick aborts the transfer, which is how xdcc_cancel stops a download already
+; under way. mIRC then reports GETFAIL for it; the daemon files that under the
+; job it has just cancelled.
+; Verified live (2026-10-22): /close -g <nick> aborts a running get, and mIRC
+; reports GETFAIL for it before this command's reply goes out.
+alias -l bridge_do_dccstop {
+  if ($2 == $null) { bridge_fail $1 0 missing-nick | return }
+  close -g $2
+  bridge_ok $1
 }
 
 alias -l bridge_do_raw {

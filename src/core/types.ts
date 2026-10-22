@@ -229,7 +229,8 @@ export type ActionName =
   | "echo"
   | "raw"
   | "nick"
-  | "disconnect";
+  | "disconnect"
+  | "dccstop";
 
 export interface CmdFrame {
   t: "cmd";
@@ -293,7 +294,15 @@ export interface SessionInfo {
  * "active". Tracked in the background, because a busy bot can take minutes to
  * answer and no tool call can wait that long (clients give up after ~60 s).
  */
-export type DccState = "requested" | "queued" | "offered" | "complete" | "refused" | "failed";
+export type DccState =
+  | "requested"
+  | "queued"
+  | "offered"
+  | "complete"
+  | "refused"
+  | "failed"
+  /** Stopped on request (xdcc_cancel), e.g. because it was the wrong file. */
+  | "cancelled";
 
 export const ACTIVE_DCC_STATES: ReadonlySet<DccState> = new Set(["requested", "queued", "offered"]);
 
@@ -302,9 +311,15 @@ export interface DccJob {
   /** The connection the request went out on, and where replies count from. */
   cid?: number;
   net: string;
-  /** From the bot's reply or its DCC offer; unknown until one of them says. */
+  /**
+   * The file's name, from the bot's reply or its DCC offer; unknown until one
+   * of them says. Surfaced to the user because a pack number from an outdated
+   * website can point at the wrong file.
+   */
   file?: string;
   size?: number;
+  /** Where mIRC saved it: FILERCVD/GETFAIL report the full local path. */
+  savedAs?: string;
   state: DccState;
   startedTs: number;
   /** When the state last changed. */
@@ -319,6 +334,8 @@ export interface DccJob {
   detail?: string;
   /** Set when the job was opened by a tool call that asked for it. */
   requestedBy?: { bot: string; pack?: string };
+  /** Who offered or sent it, for a transfer nobody here requested. */
+  sender?: string;
 }
 
 /** Snapshot of everything an agent can ask about, for `daemon_status`. */

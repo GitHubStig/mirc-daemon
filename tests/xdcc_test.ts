@@ -14,6 +14,8 @@ Deno.test("the replies iroffer-style bots actually send are classified", () => {
   const cases: Array<[string, string, Record<string, unknown>?]> = [
     // Seen live from AxA-MP1 on Rizon, 2026-10-22.
     ["** XDCC LIST Denied. Nope!", "denied"],
+    // Seen live from WG|LinuxOs|01 on irc.williamgattone.it, 2026-10-22.
+    ["** XDCC LIST negata. Scrivi !list nel canale", "denied"],
     [
       '** Sending you pack #6 ("debian-12.7.0-amd64-netinst.iso"), which is 631MB. (resume supported)',
       "sending",

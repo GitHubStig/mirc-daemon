@@ -48,6 +48,20 @@ with the bot's own words. Anything unrecognised is kept verbatim as `lastReply`,
 sent the file (on its connection when mIRC says), falling back to the oldest active job only when
 the sender is unknown. The agent may have several bots going at once.
 
+**Verified by self-send, and two handlers had to be fixed first.** The offer path, `FILERCVD` and
+`GETFAIL` never fired at all until their event headers were corrected: CTCP handlers are written
+`ctcp *:*:*:`, not `on *:CTCP`, and the two DCC events need a filename field. After the fix, all
+three arrive as designed. `$filename` turned out to be the full saved path, so the job keeps the
+plain name as `file` and the path as `savedAs`.
+
+**The user sees what is coming, and can stop it.** The pack number usually comes from a website that
+may be out of date, so the bot's reply or offer is read for the real file name and size. The tools
+return it as `downloading: pack #N is "<file>" (<size>)`, with an instruction to tell the user.
+`xdcc_cancel` stops a job: `XDCC REMOVE` to the bot while queued, `XDCC CANCEL` otherwise (what a
+person would type), and closing mIRC's download (`/close -g`) once a transfer is under way. The job
+is marked cancelled _before_ acting, because mIRC reports the abort as `GETFAIL` before it has even
+acknowledged the close. A transfer the user started themselves needs `confirm: true`.
+
 **What mIRC will do with the offer is said up front.** `bridge.mrc` reports mIRC's DCC send-request
 setting (`$sreq`). With _ignore_, `xdcc_fetch` refuses before asking the bot. With _ask_, the job's
 guidance tells the agent that the user must accept the file in mIRC. With _auto_ (the user's

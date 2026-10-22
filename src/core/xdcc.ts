@@ -55,7 +55,10 @@ export function classifyBotReply(text: string): BotReply {
   if (/invalid pack|pack (number )?(not found|does not exist)|no such pack/.test(lower)) {
     return { kind: "invalid_pack", text: plain };
   }
-  if (/\bdenied\b|not allowed|you must be on|you are banned|ignoring you/.test(lower)) {
+  // English, and the Italian "negata/negato" seen live on irc.williamgattone.it.
+  if (
+    /\bdenied\b|\bnegat[ao]\b|not allowed|you must be on|you are banned|ignoring you/.test(lower)
+  ) {
     return { kind: "denied", text: plain };
   }
   if (
