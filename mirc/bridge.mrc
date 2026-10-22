@@ -57,12 +57,25 @@ alias -l bridge_net { return $iif($network, $network, $server) }
 ; alias names are not worth the risk.
 
 ; Quote and escape a string for JSON.
+;
+; Every control character must be escaped, not just newline/CR/tab: IRC's own
+; formatting codes (^B bold, ^C colour, ^O reset, ^_ underline) are control
+; characters, and JSON.parse rejects them raw. Missing this made every coloured
+; line -- which is most XDCC bot output -- unparseable and silently dropped.
+; The loop only runs when the regex says there is something to escape.
 alias -l jstr {
   var %s = $replace($1-, $chr(92), $chr(92) $+ $chr(92))
   %s = $replace(%s, $chr(34), $chr(92) $+ $chr(34))
   %s = $replace(%s, $chr(10), $chr(92) $+ n)
   %s = $replace(%s, $chr(13), $chr(92) $+ r)
   %s = $replace(%s, $chr(9), $chr(92) $+ t)
+  if ($regex(%s, /[\x01-\x1f]/)) {
+    var %i = 1
+    while (%i < 32) {
+      %s = $replace(%s, $chr(%i), $chr(92) $+ u00 $+ $base(%i, 10, 16, 2))
+      inc %i
+    }
+  }
   return $chr(34) $+ %s $+ $chr(34)
 }
 
@@ -84,9 +97,39 @@ alias -l reshead { return $chr(123) $+ $kvo(t, $jstr(res)) $+ $chr(44) $+ $kvo(i
 ; failed parse is silent here: the command simply never runs and the daemon
 ; reports a timeout. Regex is one expression, no offsets to get wrong.
 
+;
+; The value pattern is "anything but a quote or backslash, or a backslash and
+; any one character", so an escaped quote no longer ends the value early, and
+; the result is unescaped before use. The previous [^"]* stopped at the first \"
+; and handed mIRC the raw escapes: `say "hi"` went out as `say \`.
+; Built from $chr() because a literal | would split the command in two.
 alias -l jval {
-  var %pat = / $+ $chr(34) $+ $2 $+ $chr(34) $+ $chr(58) $+ $chr(34) $+ ([^ $+ $chr(34) $+ ]*) $+ $chr(34) $+ /
-  if ($regex($1, %pat)) return $regml(1)
+  var %pat = / $+ $chr(34) $+ $2 $+ $chr(34) $+ $chr(58) $+ $chr(34) $+ ((?:[^ $+ $chr(34) $+ $chr(92) $+ $chr(92) $+ ] $+ $chr(124) $+ $chr(92) $+ $chr(92) $+ .)*) $+ $chr(34) $+ /
+  if ($regex($1, %pat)) return $junesc($regml(1))
+}
+
+; Undo JSON string escapes in one pass, so an escaped backslash followed by a
+; letter is never mistaken for a second escape. The capture is restricted to
+; the legal escape characters, none of which is special in an identifier call.
+alias -l junesc {
+  var %re = / $+ $chr(92) $+ $chr(92) $+ ([ $+ $chr(34) $+ $chr(92) $+ $chr(92) $+ /bfnrt] $+ $chr(124) $+ u[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F])/g
+  return $regsubex($1, %re, $junesc_one(\1))
+}
+
+; One escape. Newlines become spaces: a line break inside an IRC message would
+; either be cut by mIRC or, worse, start a second protocol line.
+alias -l junesc_one {
+  var %c = $1
+  if (%c === n || %c === r) return $chr(32)
+  if (%c === t) return $chr(9)
+  if (%c === b || %c === f) return
+  if ($len(%c) == 5) {
+    var %n = $base($right(%c, 4), 16, 10)
+    if (%n == 0) return
+    if (%n == 10 || %n == 13) return $chr(32)
+    return $chr(%n)
+  }
+  return %c
 }
 
 alias -l jnum {
@@ -112,6 +155,7 @@ alias bridge.start {
 }
 
 alias bridge.stop {
+  ; Every retry path uses this one timer name, so this cancels all of them.
   .timerbridgeconn off
   if ($sock(bridge)) sockclose bridge
   echo -a * bridge: stopped
@@ -145,7 +189,10 @@ alias -l bridge_helloframe {
   return $chr(123) $+ $kvo(t, $jstr(hello)) $+ $chr(44) $+ $kvo(v, 1) $+ $chr(44) $+ $kvo(token, $jstr($1)) $+ $chr(44) $+ $kvo(nick, $jstr($me)) $+ $chr(44) $+ $kvo(mirc, $jstr($version)) $+ $chr(125)
 }
 
-alias -l bridge_connect {
+; Not -l: it is run from a timer, and whether a timer may call a local alias is
+; not something to bet the reconnect loop on. The same applies to every
+; *_timeout alias below.
+alias bridge_connect {
   ; A missing or unreadable bridge.ini otherwise surfaces as "sockopen:
   ; insufficient parameters", which says nothing useful. Say what is wrong.
   if (!$bridge_host || !$bridge_port || !$bridge_token) {
@@ -161,12 +208,15 @@ alias -l bridge_connect {
 on *:START: { bridge.start }
 
 on *:SOCKOPEN:bridge: {
-  if ($sockerr) return
+  ; A refused connection lands here with $sockerr set and never reaches
+  ; SOCKCLOSE, so without this retry a daemon that was down when mIRC started
+  ; would never be found.
+  if ($sockerr) { .timerbridgeconn 1 10 bridge_connect | return }
   ; Identify first; the daemon answers `welcome` and then asks for state.
   bridge_send $bridge_helloframe($bridge_token)
 }
 
-on *:SOCKCLOSE:bridge: { .timer 1 5 bridge_connect }
+on *:SOCKCLOSE:bridge: { .timerbridgeconn 1 5 bridge_connect }
 
 ; --- read loop ------------------------------------------------------------
 
@@ -182,7 +232,9 @@ on *:SOCKREAD:bridge: {
     if ($sockerr) return
     if ($sockbr == 0) return
     if (%line != $null) {
-      set %bridge_last %line
+      ; -e keeps it out of mIRC's saved variables, and a connect frame is not
+      ; kept at all because it may carry a server password.
+      if (*"password"* !iswm %line) set -e %bridge_last %line
       bridge_dispatch %line
     }
   }
@@ -216,14 +268,15 @@ alias -l bridge_fail {
 alias -l bridge_command {
   var %id = $1, %act = $2, %f = $3-
   if (%act == state) { bridge_do_state %id | return }
-  if (%act == members) { bridge_do_members %id $jval(%f, channel) | return }
-  if (%act == ison) { bridge_do_ison %id %f | return }
+  if (%act == members) { bridge_do_members %id $jval(%f, channel) $jval(%f, nick) | return }
+  if (%act == ison) { bridge_do_ison %id $jval(%f, list) | return }
   if (%act == join) { bridge_do_join %id $jval(%f, channel) $jval(%f, key) | return }
   if (%act == part) { bridge_do_part %id $jval(%f, channel) | return }
   if (%act == msg) { bridge_do_msg %id $jval(%f, target) $jval(%f, text) | return }
   if (%act == notice) { bridge_do_notice %id $jval(%f, target) $jval(%f, text) | return }
   if (%act == echo) { bridge_do_echo %id $jval(%f, text) | return }
-  if (%act == connect) { bridge_do_connect %id $jval(%f, server) $jnum(%f, port) | return }
+  ; Port is always passed (0 for none) so a password cannot shift into its slot.
+  if (%act == connect) { bridge_do_connect %id $jval(%f, server) $iif($jnum(%f, port), $v1, 0) $jval(%f, password) | return }
   if (%act == raw) { bridge_do_raw %id $jval(%f, line) | return }
   if (%act == quit) { bridge_ok %id | quit | return }
   bridge_fail %id 0 unknown-action-$+(%act)
@@ -235,6 +288,13 @@ alias -l bridge_command {
 
 ; The payload is separate from the send so the diagnostic can show it.
 alias -l bridge_statepayload {
+  ; No network and no server means the active window is not attached to
+  ; anything; reporting a nameless "connected" network would let the daemon
+  ; think it could send.
+  if ($bridge_net == $null) return $kvo(networks, $chr(91) $+ $chr(93))
+  ; $status also has "loggingon", which is still connecting as far as an agent
+  ; is concerned. This used to be hard-coded to "connected".
+  var %st = $iif($status == connected, connected, $iif($status == disconnected, disconnected, connecting))
   var %names, %counts, %i = 1
   while (%i <= $chan(0)) {
     if (%i > 1) %names = %names $+ $chr(44)
@@ -243,7 +303,7 @@ alias -l bridge_statepayload {
     %counts = %counts $+ $jstr($chan(%i)) $+ $chr(58) $+ $nick($chan(%i), 0)
     inc %i
   }
-  var %net = $chr(123) $+ $kvo(name, $jstr($bridge_net)) $+ $chr(44) $+ $kvo(status, $jstr(connected)) $+ $chr(44) $+ $kvo(nick, $jstr($me)) $+ $chr(44) $+ $kvo(channels, $chr(91) $+ %names $+ $chr(93)) $+ $chr(44) $+ $kvo(members, $chr(123) $+ %counts $+ $chr(125)) $+ $chr(125)
+  var %net = $chr(123) $+ $kvo(name, $jstr($bridge_net)) $+ $chr(44) $+ $kvo(status, $jstr(%st)) $+ $chr(44) $+ $kvo(nick, $jstr($me)) $+ $chr(44) $+ $kvo(channels, $chr(91) $+ %names $+ $chr(93)) $+ $chr(44) $+ $kvo(members, $chr(123) $+ %counts $+ $chr(125)) $+ $chr(125)
   return $kvo(networks, $chr(91) $+ %net $+ $chr(93))
 }
 
@@ -251,20 +311,35 @@ alias -l bridge_do_state {
   bridge_ok $1 $bridge_statepayload
 }
 
+; $1 = id, $2 = channel, $3 = optional nick to test for.
+; With a nick, only presence is reported. Without one, names stop at ~2500
+; characters: a full XDCC channel's list is many times the frame limit, and the
+; daemon drops an overlong line, which turned this into a 10s timeout.
 alias -l bridge_do_members {
-  var %ch = $2, %names, %i = 1
+  var %ch = $2, %who = $3
+  ; $nick() of a channel we are not in is $null, which made "count": invalid JSON.
+  if ($me !ison %ch) { bridge_fail $1 0 not-on-channel | return }
+  var %head = $kvo(count, $nick(%ch, 0))
+  if (%who != $null) {
+    bridge_ok $1 %head $+ $chr(44) $+ $kvo(present, $iif(%who ison %ch, true, false))
+    return
+  }
+  var %names, %i = 1, %more = false
   while (%i <= $nick(%ch, 0)) {
+    if ($len(%names) > 2500) { %more = true | break }
     if (%i > 1) %names = %names $+ $chr(44)
     %names = %names $+ $jstr($nick(%ch, %i))
     inc %i
   }
-  bridge_ok $1 $kvo(count, $nick(%ch, 0)) $+ $chr(44) $+ $kvo(names, $chr(91) $+ %names $+ $chr(93))
+  bridge_ok $1 %head $+ $chr(44) $+ $kvo(truncated, %more) $+ $chr(44) $+ $kvo(names, $chr(91) $+ %names $+ $chr(93))
 }
 
+; $1 = id, $2- = space-separated nicks. The daemon sends a string rather than a
+; JSON array because the array was found by bracket position, and nicks such as
+; [XDCC]Bot contain brackets.
 alias -l bridge_do_ison {
-  var %list = $mid($2, $pos($2, $chr(91)) + 1)
-  %list = $left(%list, $pos(%list, $chr(93)) - 1)
-  %list = $replace(%list, $chr(34), $null, $chr(44), $chr(32))
+  var %list = $2-
+  if (%list == $null) { bridge_fail $1 0 missing-nicks | return }
   ; Deliberately not `set -u`: these must survive until the 303 arrives.
   set %bridge_ison_id $1
   set %bridge_ison_list %list
@@ -272,7 +347,7 @@ alias -l bridge_do_ison {
   ison %list
 }
 
-alias -l bridge_ison_timeout {
+alias bridge_ison_timeout {
   if (!$var(%bridge_ison_id)) return
   var %id = %bridge_ison_id
   .timerbridgeison off
@@ -283,8 +358,18 @@ alias -l bridge_ison_timeout {
 ; --- join / part ----------------------------------------------------------
 
 alias -l bridge_do_join {
+  ; Joining a channel we are already in makes the server say nothing at all, so
+  ; this used to sit until the daemon timed out.
+  if ($me ison $2) {
+    bridge_ok $1 $kvo(joined, $jstr($2)) $+ $chr(44) $+ $kvo(members, $nick($2, 0)) $+ $chr(44) $+ $kvo(already, true)
+    return
+  }
   set %bridge_join_id $1
   set %bridge_join_chan $2
+  ; Give up before the daemon does (its default is 10s), so a refusal this
+  ; script does not recognise is reported and the pending id is cleared rather
+  ; than left behind for an unrelated JOIN to answer.
+  .timerbridgejoin 1 8 bridge_join_timeout
   if ($3) join $2 $3
   else join $2
 }
@@ -293,8 +378,16 @@ alias -l bridge_join_failed {
   ; $1 = numeric, $2- = server text
   if (!$var(%bridge_join_id)) return
   var %id = %bridge_join_id
+  .timerbridgejoin off
   unset %bridge_join_id %bridge_join_chan
   bridge_fail %id $1 $2-
+}
+
+alias bridge_join_timeout {
+  if (!$var(%bridge_join_id)) return
+  var %id = %bridge_join_id
+  unset %bridge_join_id %bridge_join_chan
+  bridge_fail %id 0 join-timeout
 }
 
 alias -l bridge_do_part {
@@ -324,11 +417,19 @@ alias -l bridge_do_echo {
 
 ; --- connect / raw --------------------------------------------------------
 
+; $1 = id, $2 = server, $3 = port (0 for default), $4- = password
 alias -l bridge_do_connect {
   if (!$2) { bridge_fail $1 0 missing-server | return }
   ; A refusal arrives as a DISCONNECT; a silent stall times out on the daemon.
   set %bridge_conn_id $1
-  if ($3) server $2 $3
+  ; /server reuses the active connection. If that one is live, its own
+  ; DISCONNECT fires first, and must not be read as this connect failing.
+  ; VERIFY against real mIRC that exactly one DISCONNECT fires in that case.
+  if ($status != disconnected) set %bridge_conn_skipdc 1
+  else unset %bridge_conn_skipdc
+  var %port = $iif($3, $3, 6667)
+  if ($4- != $null) server $2 %port $4-
+  elseif ($3) server $2 %port
   else server $2
 }
 
@@ -352,6 +453,7 @@ on *:CONNECT: {
 on *:DISCONNECT: {
   if ($sock(bridge)) bridge_send $evp(conn) $+ $chr(44) $+ $kvo(extra, $chr(123) $+ $kvo(event, $jstr(disconnected)) $+ $chr(125)) $+ $chr(125)
   if ($var(%bridge_conn_id)) {
+    if (%bridge_conn_skipdc) { unset %bridge_conn_skipdc | return }
     var %id = %bridge_conn_id
     unset %bridge_conn_id
     bridge_fail %id 0 connection-failed
@@ -361,15 +463,21 @@ on *:DISCONNECT: {
 on *:JOIN:#: {
   if ($nick == $me && $var(%bridge_join_id) && $istok(%bridge_join_chan, $chan, 32)) {
     var %id = %bridge_join_id
+    .timerbridgejoin off
     unset %bridge_join_id %bridge_join_chan
     bridge_ok %id $kvo(joined, $jstr($chan)) $+ $chr(44) $+ $kvo(members, $nick($chan, 0))
   }
   if ($sock(bridge)) bridge_send $evp(join) $+ $chr(44) $+ $kvo(buf, $jstr($chan)) $+ $chr(44) $+ $kvo(nick, $jstr($nick)) $+ $chr(125)
 }
 
-; The refusals IRC actually reports: 403 no such channel, 471 full, 473
-; invite-only, 474 banned, 475 key, 477 registered nick required.
+; The refusals IRC actually reports: 403 no such channel, 405 too many channels,
+; 437 temporarily unavailable, 471 full, 473 invite-only, 474 banned, 475 key,
+; 477 registered nick required, 489 TLS-only. Anything else is caught by the
+; join timer. These only act while a join is pending.
 raw 403:*:{ bridge_join_failed 403 $2- }
+raw 405:*:{ bridge_join_failed 405 $2- }
+raw 437:*:{ bridge_join_failed 437 $2- }
+raw 489:*:{ bridge_join_failed 489 $2- }
 raw 471:*:{ bridge_join_failed 471 $2- }
 raw 473:*:{ bridge_join_failed 473 $2- }
 raw 474:*:{ bridge_join_failed 474 $2- }
@@ -402,16 +510,20 @@ raw *:*: {
   bridge_send $evp(raw) $+ $chr(44) $+ $kvo(raw, $jstr($1-)) $+ $chr(125)
 }
 
+; For a private message $target is our own nick, so the buffer is named after
+; the sender instead -- the query window mIRC itself would show it in.
+alias -l bridge_buf { return $iif($target == $me, $nick, $target) }
+
 on *:TEXT:*:*: {
   if (!$sock(bridge)) return
   if ($len($1-) > 3000) return
-  bridge_send $evp(text) $+ $chr(44) $+ $kvo(buf, $jstr($target)) $+ $chr(44) $+ $kvo(nick, $jstr($nick)) $+ $chr(44) $+ $kvo(user, $jstr($address)) $+ $chr(44) $+ $kvo(text, $jstr($1-)) $+ $chr(125)
+  bridge_send $evp(text) $+ $chr(44) $+ $kvo(buf, $jstr($bridge_buf)) $+ $chr(44) $+ $kvo(nick, $jstr($nick)) $+ $chr(44) $+ $kvo(user, $jstr($address)) $+ $chr(44) $+ $kvo(text, $jstr($1-)) $+ $chr(125)
 }
 
 on *:NOTICE:*:*: {
   if (!$sock(bridge)) return
   if ($len($1-) > 3000) return
-  bridge_send $evp(notice) $+ $chr(44) $+ $kvo(buf, $jstr($target)) $+ $chr(44) $+ $kvo(nick, $jstr($nick)) $+ $chr(44) $+ $kvo(user, $jstr($address)) $+ $chr(44) $+ $kvo(text, $jstr($1-)) $+ $chr(125)
+  bridge_send $evp(notice) $+ $chr(44) $+ $kvo(buf, $jstr($bridge_buf)) $+ $chr(44) $+ $kvo(nick, $jstr($nick)) $+ $chr(44) $+ $kvo(user, $jstr($address)) $+ $chr(44) $+ $kvo(text, $jstr($1-)) $+ $chr(125)
 }
 
 on *:CTCP:*:*: {

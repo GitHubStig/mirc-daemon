@@ -17,7 +17,7 @@ Proven by running it, with evidence in the log:
   daemon's state model then holds the network, the joined channel and member counts.
 - **Daemon runs**: `deno task start` binds `127.0.0.1:8686` (mIRC, raw TCP) and `127.0.0.1:8687`
   (agents, HTTP). `/health` is unauthenticated, `/status` and `/mcp` require the bearer token.
-- **140 automated tests** (`deno task test`): MBP framing including CRLF and oversize rejection,
+- **160 automated tests** (`deno task test`): MBP framing including CRLF and oversize rejection,
   logging with redaction, the state model, the event log and waits, credit-limited command dispatch,
   the failure taxonomy, DCC outcome tracking, the listener, config, the INI reader, the HTTP door,
   the 20-tool MCP surface driven by the SDK's own client, and the frame shapes `bridge.mrc` emits
@@ -27,6 +27,22 @@ Proven by running it, with evidence in the log:
 ## Not verified
 
 Assumed or untested. Treat these as the actual risk surface:
+
+- **The audit fixes to `bridge.mrc` have never run in mIRC.** The handshake above was proven with
+  the previous version. The new string handling is mirrored in TypeScript in
+  `tests/bridge_contract_test.ts`, which pins down the algorithm, not the mSL. Re-copy `bridge.mrc`
+  into the mIRC folder, then check, in this order:
+  1. `/bridge.diag` still prints `jval-test t=cmd id=c1 action=state`, since `jval` was rewritten.
+  2. Someone sends a **bold or coloured** line in a channel: it shows in `irc_read` with its
+     formatting codes, and `deno task log:tail` shows no `mbp.bad-frame`.
+  3. `irc_send` with `say "hi" C:\dir` arrives in the channel exactly like that.
+  4. `irc_join` on a channel you are already in returns at once with `already: true`. On a channel
+     that refuses you, it fails with a code within 8s.
+  5. `irc_members` on a large channel returns `truncated: true` rather than timing out.
+  6. Start mIRC with the daemon **down**, then start the daemon: mIRC attaches within 10s.
+  7. `irc_connect` while already connected: no spurious `connect_failed` before the new connection
+     comes up (see `%bridge_conn_skipdc`).
+  8. A private message lands in `irc_read` with `buffer` set to the sender's nick.
 
 - **The agent path has never been driven against the live daemon.** Every MCP test uses `fake_mirc`.
   So "an agent calls `irc_send` and a message appears in a channel" is unproven.
@@ -58,6 +74,15 @@ are not reintroduced.
    frame leaves mIRC holding a buffer forever. The encoder sends CRLF; `bridge.ini` is written with
    CRLF too, because mIRC's INI parser is a Windows reader.
 6. **`$sock(name).rq` is an unreliable loop guard.** The read loop is driven by `$sockbr` instead.
+
+Found by audit rather than by running it, and fixed in the same silent shape:
+
+7. **IRC formatting codes are control characters.** `jstr` escaped only `\n \r \t`, so every bold or
+   coloured line was invalid JSON and dropped by the daemon. Most XDCC bot output is coloured.
+8. **`"([^"]*)"` is not a JSON string reader.** It stopped at the first escaped quote and never
+   unescaped, so `say "hi"` went out as `say \`.
+9. **A pattern with a literal `|` is two commands.** Any regex alternation in mSL is built with
+   `$chr(124)`.
 
 ## Running it
 

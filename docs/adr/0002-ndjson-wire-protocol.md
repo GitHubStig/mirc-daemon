@@ -24,6 +24,18 @@ read, since `sockread` waits for `$crlf` and silently yields nothing until it ar
 
 The decoder splits on LF alone, not on "universal newlines".
 
+Strings are escaped in full on both sides. mSL builds JSON by hand, so `bridge.mrc` escapes every C0
+control character, not just newline, CR and tab, because IRC formatting (bold, colour, underline,
+reset) is made of control characters and `JSON.parse` rejects them raw. The daemon also escapes any
+stray control character before parsing, since a user's copy of `bridge.mrc` can be older than the
+daemon. Going the other way, `bridge.mrc` reads a value as "non-quote, non-backslash, or backslash
+plus one character" and then unescapes it. Line breaks in outbound text become spaces, so an agent's
+text can never start a second IRC command.
+
+Values mSL would have to find by position are sent as plain strings instead. `ison` takes its nicks
+as one space-separated `list`, because the JSON array was found by bracket position and nicks such
+as `[XDCC]Bot` contain brackets.
+
 ## Consequences
 
 - Framing is exact and lossless, and a wire trace is readable in any terminal.
@@ -34,4 +46,7 @@ The decoder splits on LF alone, not on "universal newlines".
 - `U+2028`/`U+2029` are legal inside JSON strings, so a reader that treated them as line breaks
   would corrupt frames. This is why the decoder is hand-written rather than built on a generic line
   reader.
-- Large payloads must be paginated; nothing may assume it can send an unbounded line.
+- Large payloads must be paginated; nothing may assume it can send an unbounded line. The same limit
+  applies inbound: the daemon drops an overlong line, so `members` stops listing names at about 2500
+  characters and reports `truncated`. Callers that only need one nick ask about that nick and get
+  back `present`.

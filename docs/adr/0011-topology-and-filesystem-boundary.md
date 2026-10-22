@@ -30,3 +30,7 @@ never opens the mIRC socket.
   trusted LAN and requires a tunnel anywhere else; neither door may be exposed to the internet.
 - Anything added later that wants to read a file has to justify crossing this boundary, which is the
   point.
+- One exception already exists. By default the daemon reads its token from `mirc/bridge.ini`, the
+  file mIRC uses, so the secret never has to appear on a command line. This is only a convenience
+  for running both on the same machine: on another machine the file is simply absent, and the token
+  comes from `MIRC_DAEMON_TOKEN` or `--token-file`.

@@ -32,7 +32,7 @@ reworking it.
   on a different machine from mIRC.
 - **The agent-facing surface is MCP only.** No REST API, no SSE firehose, no second HTTP façade. To
   expose a capability, add an MCP tool.
-- **Every server→mIRC frame must be LF-terminated and under ~3500 bytes.** mIRC's `sockread` is
+- **Every server→mIRC frame must be CRLF-terminated and under ~3500 bytes.** mIRC's `sockread` is
   CRLF-delimited and its line limit is just under 4150 bytes, so a missing newline or an oversized
   frame is a bug on our side, not a client problem. See `src/core/wire.ts`.
 - **Commands are never fire-and-forget.** Each awaits an outcome within a timeout and reports a
