@@ -1274,3 +1274,57 @@ Deno.test("xdcc_cancel: mIRC reporting the abort before acknowledging it still e
     await s.stop();
   }
 });
+
+Deno.test("two connections on one network: cid picks one, the name alone is refused", async () => {
+  const s = await stack();
+  try {
+    // The user's EFnet and a second EFnet connection the agent opened.
+    s.fake.setNetworks([network(), network({ cid: 1751, channels: [], members: {} })]);
+    const session = s.mirc.registry.resolve()!;
+    await session.refreshState();
+    session.owned.openedConnection(1751);
+
+    const vague = await s.client.callTool({
+      name: "irc_disconnect",
+      arguments: { network: "net1" },
+    });
+    assertEquals(textOf(vague).startsWith("ambiguous_network:"), true);
+    assertEquals(textOf(vague).includes("Pass cid"), true);
+
+    const unnamed = await s.client.callTool({ name: "irc_disconnect", arguments: {} });
+    assertEquals(textOf(unnamed).startsWith("unknown_network:"), true);
+
+    const mismatch = await s.client.callTool({
+      name: "irc_disconnect",
+      arguments: { network: "Rizon", cid: 1751 },
+    });
+    assertEquals(textOf(mismatch).includes('is on "net1"'), true);
+
+    const exact = await s.client.callTool({
+      name: "irc_disconnect",
+      arguments: { cid: 1751, message: "i'm not a bot" },
+    });
+    assertEquals(exact.isError ?? false, false);
+    const sent = s.fake.received.filter((c) => c.action === "disconnect");
+    assertEquals(sent.length, 1);
+    assertEquals(sent[0].params?.cid, 1751);
+    assertEquals(sent[0].params?.message, "i'm not a bot");
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("irc_part carries a part message when given, and none otherwise", async () => {
+  const s = await stack();
+  try {
+    await s.client.callTool({
+      name: "irc_part",
+      arguments: { channel: "#chan", message: "bye all", confirm: true },
+    });
+    await s.client.callTool({ name: "irc_part", arguments: { channel: "#chan", confirm: true } });
+    const parts = s.fake.received.filter((c) => c.action === "part");
+    assertEquals(parts.map((c) => c.params?.message), ["bye all", undefined]);
+  } finally {
+    await s.stop();
+  }
+});

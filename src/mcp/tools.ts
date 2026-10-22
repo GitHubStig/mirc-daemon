@@ -135,9 +135,27 @@ async function targetOf(
   session: Session,
   network: string | undefined,
   thresholdMs: number,
+  cid?: number,
 ): Promise<NetworkState> {
   await freshen(session, thresholdMs);
-  return session.state.resolve(network);
+  if (cid === undefined) return session.state.resolve(network);
+  // An explicit connection id wins: it is how two connections to one network
+  // (say the user's and the agent's, both on EFnet) are told apart.
+  const net = session.state.byCid(cid);
+  if (!net) {
+    throw new BridgeFailure(
+      bridgeError("unknown_network", `mIRC has no connection with cid ${cid}; see irc_get_state.`),
+    );
+  }
+  if (network !== undefined && !sameNetwork(net.name, network)) {
+    throw new BridgeFailure(
+      bridgeError(
+        "unknown_network",
+        `cid ${cid} is on "${net.name}", not "${network}". Pass one or the other.`,
+      ),
+    );
+  }
+  return net;
 }
 
 /** The refusal for touching something the agent did not open or join itself. */
@@ -307,15 +325,31 @@ const confirmArg = z
     "Set true ONLY when the user explicitly asked for this. Needed for anything the agent did " +
       "not open or join itself, i.e. the user's own channels and connections.",
   );
+const cidArg = z
+  .int()
+  .optional()
+  .describe(
+    "A specific connection, from irc_get_state. Only needed when two connections share a " +
+      "network and the network name alone is ambiguous.",
+  );
 const partSchema = z.object({
   session: sessionArg,
   network: networkArg,
+  cid: cidArg,
   channel: z.string(),
+  message: z
+    .string()
+    .optional()
+    .describe("Part message, as /part #chan <message>. Omit to leave without one."),
   confirm: confirmArg,
 });
 const disconnectSchema = z.object({
   session: sessionArg,
-  network: z.string().describe("The network to disconnect from. Required: never inferred."),
+  network: z
+    .string()
+    .optional()
+    .describe("The network to disconnect from. Never inferred: name it, or pass cid."),
+  cid: cidArg,
   message: z
     .string()
     .optional()
@@ -325,6 +359,7 @@ const disconnectSchema = z.object({
 const nickSchema = z.object({
   session: sessionArg,
   network: networkArg,
+  cid: cidArg,
   nick: z.string().min(1),
   confirm: confirmArg,
 });
@@ -827,17 +862,18 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
       description:
         "Leave a channel, only when the user asked or the task they gave includes leaving. " +
         "Never tidy up on your own initiative. Channels the agent joined itself need no " +
-        "confirmation; the user's own channels need confirm: true.",
+        "confirmation; the user's own channels need confirm: true. Takes an optional part " +
+        "message, if the user gave one.",
       inputSchema: partSchema.shape,
     },
-    ({ session, network, channel, confirm }: PartArgs) =>
+    ({ session, network, cid, channel, message, confirm }: PartArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        const net = await targetOf(s, network, stateFreshnessMs);
+        const net = await targetOf(s, network, stateFreshnessMs, cid);
         if (!s.owned.ownsChannel(net.cid, channel) && confirm !== true) {
           return usersOwn(channel, net);
         }
-        return fromOutcome(await s.commands.send("part", { cid: net.cid, channel }));
+        return fromOutcome(await s.commands.send("part", { cid: net.cid, channel, message }));
       }),
   );
 
@@ -851,10 +887,16 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         "confirm: true. Quits with mIRC's own default message unless one is given.",
       inputSchema: disconnectSchema.shape,
     },
-    ({ session, network, message, confirm }: DisconnectArgs) =>
+    ({ session, network, cid, message, confirm }: DisconnectArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        const net = await targetOf(s, network, stateFreshnessMs);
+        // Never inferred: disconnecting the wrong network is not undoable.
+        if (network === undefined && cid === undefined) {
+          return failure(
+            bridgeError("unknown_network", "name the network to disconnect, or pass its cid."),
+          );
+        }
+        const net = await targetOf(s, network, stateFreshnessMs, cid);
         if (!s.owned.ownsConnection(net.cid) && confirm !== true) {
           return usersOwn("This connection", net);
         }
@@ -880,10 +922,10 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         "only when the user asked. Waits for the server to accept or refuse it.",
       inputSchema: nickSchema.shape,
     },
-    ({ session, network, nick, confirm }: NickArgs) =>
+    ({ session, network, cid, nick, confirm }: NickArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        const net = await targetOf(s, network, stateFreshnessMs);
+        const net = await targetOf(s, network, stateFreshnessMs, cid);
         if (!s.owned.ownsConnection(net.cid) && confirm !== true) {
           return usersOwn("The nick", net);
         }

@@ -173,7 +173,7 @@ export class StateModel {
         bridgeError(
           "ambiguous_network",
           `mIRC has ${matches.length} connections to "${name}" (${describe(matches)}). ` +
-            "Close the extra one in mIRC, or ask the user which to use.",
+            "Pass cid to pick one, or ask the user which to use.",
         ),
       );
     }

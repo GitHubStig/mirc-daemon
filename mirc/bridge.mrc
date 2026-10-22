@@ -321,7 +321,7 @@ alias -l bridge_command {
   if (%act == members) { bridge_do_members %id $jparam(%f, channel) $jparam(%f, nick) | return }
   if (%act == ison) { bridge_do_ison %id $jparam(%f, list) | return }
   if (%act == join) { bridge_do_join %id $jparam(%f, channel) $jparam(%f, key) | return }
-  if (%act == part) { bridge_do_part %id $jparam(%f, channel) | return }
+  if (%act == part) { bridge_do_part %id $jparam(%f, channel) $jparam(%f, message) | return }
   if (%act == msg) { bridge_do_msg %id $jparam(%f, target) $jparam(%f, text) | return }
   if (%act == notice) { bridge_do_notice %id $jparam(%f, target) $jparam(%f, text) | return }
   if (%act == echo) { bridge_do_echo %id $jparam(%f, text) | return }
@@ -481,7 +481,9 @@ alias -l bridge_do_part {
   set -e %bridge_part_chan $2
   set -e %bridge_part_cid $cid
   .timerbridgepart 1 8 bridge_part_timeout
-  part $2
+  ; $3- is the part message, if the user gave one (a channel name has no spaces).
+  if ($3- != $null) part $2 $3-
+  else part $2
 }
 
 alias bridge_part_timeout {
