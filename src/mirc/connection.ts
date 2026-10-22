@@ -76,13 +76,14 @@ export async function handleMircConnection(
 ): Promise<void> {
   const { log, registry } = options;
   const decoder = new LineDecoder();
-  const writer = new SocketWriter(conn, log);
   const remote = describe(conn);
+  const connectionLog = log.child({ remote });
+  // The connection's logger, not the door's, so outbound frames carry `remote`
+  // like inbound ones and both directions of one socket can be read together.
+  const writer = new SocketWriter(conn, connectionLog);
 
   let session: Session | undefined;
   let closed = false;
-
-  const connectionLog = log.child({ remote });
 
   const close = (reason: string): void => {
     if (closed) return;

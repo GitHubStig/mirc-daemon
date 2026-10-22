@@ -18,7 +18,7 @@ Proven by running it, with evidence in the log:
   daemon's state model then holds the network, the joined channel and member counts.
 - **Daemon runs**: `deno task start` binds `127.0.0.1:8686` (mIRC, raw TCP) and `127.0.0.1:8687`
   (agents, HTTP). `/health` is unauthenticated, `/status` and `/mcp` require the bearer token.
-- **168 automated tests** (`deno task test`): MBP framing including CRLF and oversize rejection,
+- **169 automated tests** (`deno task test`): MBP framing including CRLF and oversize rejection,
   logging with redaction, the state model, the event log and waits, credit-limited command dispatch,
   the failure taxonomy, DCC outcome tracking, the listener, config, the INI reader, the HTTP door,
   the 20-tool MCP surface driven by the SDK's own client, and the frame shapes `bridge.mrc` emits
@@ -40,6 +40,13 @@ Proven by running it, with evidence in the log:
     a bold code came back from the server **byte for byte** in about 220 ms. That also proves an
     inbound control character survives `jstr` and parses.
   - `irc_read` paged it from a cursor.
+- **Reconnecting, both ways** (2026-10-22):
+  - With the daemon down, `/bridge.start` armed the `bridgeconn` retry timer, which confirms that a
+    refused `sockopen` reaches `SOCKOPEN` with `$sockerr` set. Starting the daemon then got a full
+    v2 handshake 8.5 s later.
+  - With the daemon restarted mid-session, `SOCKCLOSE` reattached it within 5 s.
+  - mIRC says each transition exactly once: "lost the daemon connection, retrying every 5s", then
+    "reconnected to the daemon".
 
 ## Not verified
 
@@ -51,10 +58,9 @@ fixes, in order:
    TEXT path, not NOTICE.)
 2. `irc_join` on a channel that refuses you fails with a code within 8s.
 3. `irc_members` on a large channel returns `truncated: true` rather than timing out.
-4. Start mIRC with the daemon **down**, then start the daemon: mIRC attaches within 10s.
-5. `irc_connect` while already connected: no spurious `connect_failed` before the new connection
+4. `irc_connect` while already connected: no spurious `connect_failed` before the new connection
    comes up (see `%bridge_conn_skipdc`).
-6. A private message **from someone else** lands in `irc_read` with `buffer` set to the sender's
+5. A private message **from someone else** lands in `irc_read` with `buffer` set to the sender's
    nick. (Messaging ourselves cannot tell the two apart.)
 
 Beyond those:
@@ -127,14 +133,14 @@ In mIRC: `/load -rs bridge.mrc` then `/bridge.start`. Available while debugging:
 
 ## Next, in order
 
-1. **Drive the agent path.** Point an MCP client at `http://127.0.0.1:8687/mcp` with the bearer
-   token and run `irc_get_state`, then `irc_send`, then `irc_wait_for` against the live daemon. This
-   is the first time the whole chain is exercised.
+1. **Finish the live checklist** under "Not verified". The agent path itself is proven; what is left
+   needs another person or a visible action in a channel.
 2. **XDCC end-to-end.** `xdcc_list`, then `xdcc_fetch` against a real bot; confirm the request, the
    bot's reply, and a DCC offer.
 3. **Recon** the DCC questions above and delete the guesswork from ADR-0010.
-4. **Cleanup**: multi-network state via `/scon -r`; decide whether `--allow-raw` is needed; consider
-   a daemon-side heartbeat so a dead link is noticed without waiting on TCP.
+4. **Cleanup**: multi-network state via `/scon -r` (open question: make the `network` argument work,
+   or remove it); decide whether `--allow-raw` is needed; consider a daemon-side heartbeat so a dead
+   link is noticed without waiting on TCP.
 
 ## Shape of the thing
 

@@ -142,6 +142,8 @@ alias bridge.start {
   ; stale connection means the daemon never re-queries state -- which looks
   ; exactly like a hang, because nothing is sent and nothing arrives.
   if ($sock(bridge)) sockclose bridge
+  ; A manual start should report what happens next, even mid-outage.
+  unset %bridge_down
   bridge_connect
   .timerbridgeconn 1 10 bridge_connect
 }
@@ -150,6 +152,7 @@ alias bridge.stop {
   ; Every retry path uses this one timer name, so this cancels all of them.
   .timerbridgeconn off
   if ($sock(bridge)) sockclose bridge
+  unset %bridge_down
   echo -a * bridge: stopped
 }
 
@@ -210,12 +213,28 @@ on *:SOCKOPEN:bridge: {
   ; A refused connection lands here with $sockerr set and never reaches
   ; SOCKCLOSE, so without this retry a daemon that was down when mIRC started
   ; would never be found.
-  if ($sockerr) { .timerbridgeconn 1 10 bridge_connect | return }
+  if ($sockerr) {
+    bridge_down daemon not reachable at $bridge_host $+ : $+ $bridge_port $+ , retrying every 10s
+    .timerbridgeconn 1 10 bridge_connect
+    return
+  }
+  if (%bridge_down) { echo -a * bridge: reconnected to the daemon | unset %bridge_down }
   ; Identify first; the daemon answers `welcome` and then asks for state.
   bridge_send $bridge_helloframe($bridge_token)
 }
 
-on *:SOCKCLOSE:bridge: { .timerbridgeconn 1 5 bridge_connect }
+on *:SOCKCLOSE:bridge: {
+  bridge_down lost the daemon connection, retrying every 5s
+  .timerbridgeconn 1 5 bridge_connect
+}
+
+; Say so once when the link goes down, not on every retry: a silent retry
+; loop is indistinguishable from a script that is doing nothing at all.
+alias -l bridge_down {
+  if (%bridge_down) return
+  set -e %bridge_down 1
+  echo -a * bridge: $1-
+}
 
 ; --- read loop ------------------------------------------------------------
 

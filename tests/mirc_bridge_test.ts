@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { nullLogger } from "../src/core/log.ts";
+import { createLogger, nullLogger } from "../src/core/log.ts";
 import type { NetworkState } from "../src/core/types.ts";
 import { type RunningMircListener, startMircListener } from "../src/mirc/listener.ts";
 import { waitForEvent } from "../src/core/waits.ts";
@@ -304,3 +304,29 @@ function assertCommandSeen(fake: FakeMirc, action: string): void {
     `expected mIRC to have received a "${action}" command`,
   );
 }
+
+Deno.test("both directions of one socket are logged with its remote address", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const log = createLogger({ dir, mirrorToConsole: false });
+    const h = daemon({ log: log.child({ door: "mirc" }) });
+    try {
+      const fake = await h.connect();
+      await until(() => fake.received.some((c) => c.action === "state"), { label: "state" });
+      await fake.close();
+    } finally {
+      await h.stop();
+      await log.close();
+    }
+
+    const file = [...Deno.readDirSync(dir)].map((e) => `${dir}/${e.name}`)[0];
+    const records = (await Deno.readTextFile(file)).trim().split("\n").map((l) => JSON.parse(l));
+    const inbound = records.find((r) => r.kind === "mbp.in");
+    const outbound = records.find((r) => r.kind === "mbp.out");
+    assertEquals(typeof inbound?.remote, "string");
+    assertEquals(outbound?.remote, inbound?.remote);
+    assertEquals(outbound?.door, "mirc");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
