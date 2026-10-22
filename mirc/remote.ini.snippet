@@ -1,0 +1,37 @@
+; ============================================================================
+;  Paste this ONE line into mIRC's own remote.ini.
+;
+;  It loads our script at startup and then starts the bridge. Loading is
+;  idempotent, so restarting mIRC will not double-load it.
+;
+;  Do not put the rest of the bridge here: remote.ini is mIRC's file and may
+;  already hold your scripts. All our code lives in mirc/bridge.mrc.
+; ============================================================================
+
+;  Put bridge.mrc and bridge.ini together, either directly in the mIRC folder or
+;  in its scripts\ subfolder. bridge.ini is resolved next to bridge.mrc, so the
+;  pair stays portable. If you use scripts\, change the path in the line below.
+;  mIRC does not care where a script lives; scripts\ is its convention for the
+;  aliases/popups files it ships, not a rule for yours.
+on *:START: { if (!$script(bridge.mrc)) { .load -rs $iif($right($mircdir, 1) == $chr(92), $mircdir, $mircdir $+ $chr(92)) $+ bridge.mrc } | bridge.start }
+
+; ----------------------------------------------------------------------------
+;  After pasting:
+;
+;   1. Copy bridge.mrc and bridge.ini into the folder mIRC actually uses.
+;      Ask mIRC:   /echo -a $mircdir
+;
+;      That is the folder holding YOUR mirc.ini and remote.ini — normally
+;      %APPDATA%\mIRC on mIRC 7+. It is NOT the "defaults" folder inside the
+;      installation: that one only holds templates mIRC copies on first run,
+;      and edits there are ignored.
+;
+;      (`deno task token` writes bridge.ini; copy it, do not retype the token.)
+;   2. Restart mIRC, or run:  /load -rs bridge.mrc  then  /bridge.start
+;   3. Watch the daemon log — it records both directions of every frame:
+;        deno task log:tail
+;
+;  If nothing arrives, check in mIRC's status window:
+;    /echo -a $sock(bridge)          (empty means the socket is not open)
+;    /echo -a $sock(bridge).wserr    (last socket write error)
+; ----------------------------------------------------------------------------

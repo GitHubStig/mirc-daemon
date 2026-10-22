@@ -1,0 +1,10 @@
+; Copy this file to your mIRC directory as bridge.ini, and replace the token
+; with the one printed by `deno task token`. The real file is gitignored.
+;
+; This is a credential file: it must match the token the daemon uses, which is
+; the same value handed to agents as MIRC_DAEMON_TOKEN.
+
+[bridge]
+host=127.0.0.1
+port=8686
+token=replace-me
