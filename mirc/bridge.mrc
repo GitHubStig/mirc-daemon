@@ -411,10 +411,12 @@ alias -l bridge_do_members {
 alias -l bridge_do_ison {
   var %list = $2-
   if (%list == $null) { bridge_fail $1 0 missing-nicks | return }
-  ; Deliberately not `set -u`: these must survive until the 303 arrives.
-  set %bridge_ison_id $1
-  set %bridge_ison_list %list
-  set %bridge_ison_cid $cid
+  ; Deliberately not `set -u`: these must survive until the 303 arrives. But
+  ; `-e` (unset on exit), like every pending-command variable here: a reply
+  ; that never came must not leave state behind in vars.ini across a restart.
+  set -e %bridge_ison_id $1
+  set -e %bridge_ison_list %list
+  set -e %bridge_ison_cid $cid
   .timerbridgeison 1 10 bridge_ison_timeout
   ison %list
 }
@@ -436,11 +438,11 @@ alias -l bridge_do_join {
     bridge_ok $1 $kvo(joined, $jstr($2)) $+ $chr(44) $+ $kvo(members, $nick($2, 0)) $+ $chr(44) $+ $kvo(already, true)
     return
   }
-  set %bridge_join_id $1
-  set %bridge_join_chan $2
+  set -e %bridge_join_id $1
+  set -e %bridge_join_chan $2
   ; The same channel name can exist on several networks; only this
   ; connection's 366 or refusal may answer.
-  set %bridge_join_cid $cid
+  set -e %bridge_join_cid $cid
   ; Give up before the daemon does (its default is 10s), so a refusal this
   ; script does not recognise is reported and the pending id is cleared rather
   ; than left behind for an unrelated JOIN to answer.
@@ -471,9 +473,9 @@ alias bridge_join_timeout {
 ; answer `already: true` without joining.
 alias -l bridge_do_part {
   if (!$chan($2)) { bridge_fail $1 0 not-on-channel | return }
-  set %bridge_part_id $1
-  set %bridge_part_chan $2
-  set %bridge_part_cid $cid
+  set -e %bridge_part_id $1
+  set -e %bridge_part_chan $2
+  set -e %bridge_part_cid $cid
   .timerbridgepart 1 8 bridge_part_timeout
   part $2
 }
@@ -527,8 +529,8 @@ alias -l bridge_do_connect {
   if (%new == $null) { bridge_fail $1 0 no-new-connection | return }
   ; A refusal arrives as that connection's DISCONNECT; a silent stall times out
   ; on the daemon.
-  set %bridge_conn_id $1
-  set %bridge_conn_cid %new
+  set -e %bridge_conn_id $1
+  set -e %bridge_conn_cid %new
 }
 
 alias -l bridge_do_raw {
