@@ -27,3 +27,21 @@ speaks. Verify the choice empirically with `pi mcp list` rather than trusting do
 - Moving to `2026-07-28` is a dependency swap rather than a rewrite.
 - We do not yet serve clients that speak only `2026-07-28`, which is accepted while the clients we
   care about do not.
+
+## The SDK's cost, and the exit path
+
+The v1 SDK resolves to 91 unique packages in `deno.lock`, including `express`, `express-rate-limit`
+and `hono`. Those exist for the SDK's own HTTP server helpers; we take only the protocol layer and
+hand its requests to `Deno.serve`, so they are dead weight on a local daemon's supply-chain surface.
+
+That is not yet a reason to replace it, because what it does for us is real:
+`initialize`/`initialized` negotiation, `Mcp-Session-Id` bookkeeping and Streamable HTTP framing.
+Hand-rolling those correctly is exactly what the dependency is buying.
+
+The trade improves as the revision moves. `2026-07-28` removes the handshake and the session —
+precisely the machinery the SDK is currently carrying. A stateless `tools/list` and `tools/call`
+over JSON-RPC is a few hundred lines of request handler, so the cost of replacing the SDK falls at
+the same moment its value does.
+
+**Revisit when the client adopts `2026-07-28`**, and rewrite this ADR rather than adding a second
+one. Until then the SDK stays, and the extra packages are accepted debt.
