@@ -163,7 +163,7 @@ Deno.test("the MCP surface advertises the tools an agent needs", async () => {
     for (
       const expected of [
         "daemon_status",
-        "irc_close_windows",
+        "irc_cleanup",
         "irc_connect",
         "irc_dcc_status",
         "irc_get_state",
@@ -189,7 +189,13 @@ Deno.test("the MCP surface advertises the tools an agent needs", async () => {
     // Merged into the tools above. Near-duplicates confused a small local
     // model into calling one over and over, so they must not come back.
     for (
-      const merged of ["irc_ensure_joined", "irc_notice", "irc_dcc_watch", "irc_list_sessions"]
+      const merged of [
+        "irc_ensure_joined",
+        "irc_notice",
+        "irc_dcc_watch",
+        "irc_list_sessions",
+        "irc_close_windows",
+      ]
     ) {
       assertEquals(names.includes(merged), false, `merged tool is back: ${merged}`);
     }
@@ -788,7 +794,7 @@ Deno.test("the agent's own connection can be closed; the user's needs confirm", 
   }
 });
 
-Deno.test("irc_close_windows closes the agent's idle windows; the user's need confirm", async () => {
+Deno.test("irc_disconnect closes the agent's window, unless a user's would go too", async () => {
   const s = await stack();
   try {
     growOnConnect(s, 7, "Rizon");
@@ -796,41 +802,131 @@ Deno.test("irc_close_windows closes the agent's idle windows; the user's need co
       name: "irc_connect",
       arguments: { network: "Rizon", server: "irc.rizon.net" },
     });
-    const rizonQuit = network({
-      cid: 7,
-      name: "Rizon",
-      status: "disconnected",
-      channels: [],
-      members: {},
-    });
+    const rizon = network({ cid: 7, name: "Rizon", channels: [], members: {} });
+    const rizonQuit = { ...rizon, status: "disconnected" as const };
     // mIRC as it behaved live: /close -it removes every disconnected window.
     s.fake.setHandler((cmd, fake) => {
       if (cmd.action === "disconnect") fake.setNetworks([network(), rizonQuit]);
       if (cmd.action === "closewin") fake.setNetworks([network()]);
       return undefined;
     });
-
-    const nothing = JSON.parse(textOf(
-      await s.client.callTool({ name: "irc_close_windows", arguments: {} }),
-    ));
-    assertEquals(nothing.skipped, true);
-
-    await s.client.callTool({ name: "irc_disconnect", arguments: { cid: 7 } });
     const closed = JSON.parse(textOf(
-      await s.client.callTool({ name: "irc_close_windows", arguments: {} }),
+      await s.client.callTool({ name: "irc_disconnect", arguments: { cid: 7 } }),
     ));
-    assertEquals(closed.closed, [{ cid: 7, name: "Rizon" }]);
+    assertEquals(closed.done, "Disconnected from Rizon and closed its window.");
+    assertEquals(s.fake.received.filter((c) => c.action === "closewin").length, 1);
 
-    // A disconnected window of the user's would go too, so it needs their say-so.
-    s.fake.setNetworks([
-      network(),
-      network({ cid: 9, name: "Libera", status: "disconnected", channels: [], members: {} }),
-    ]);
-    const before = s.fake.received.filter((c) => c.action === "closewin").length;
-    const users = await s.client.callTool({ name: "irc_close_windows", arguments: {} });
-    assertEquals(textOf(users).startsWith("guard_denied:"), true);
-    assertEquals(textOf(users).includes("cid 9 (Libera)"), true);
-    assertEquals(s.fake.received.filter((c) => c.action === "closewin").length, before);
+    // A disconnected window of the user's would go too, so all of them stay.
+    growOnConnect(s, 8, "Rizon");
+    await s.client.callTool({
+      name: "irc_connect",
+      arguments: { network: "Rizon", server: "irc.rizon.net" },
+    });
+    const libera = network({ cid: 9, name: "Libera", status: "disconnected", channels: [] });
+    s.fake.setNetworks([network(), { ...rizon, cid: 8 }, libera]);
+    s.fake.setHandler((cmd, fake) => {
+      if (cmd.action === "disconnect") {
+        fake.setNetworks([network(), { ...rizonQuit, cid: 8 }, libera]);
+      }
+      return undefined;
+    });
+    const kept = JSON.parse(textOf(
+      await s.client.callTool({ name: "irc_disconnect", arguments: { cid: 8 } }),
+    ));
+    assertEquals(kept.done, "Disconnected from Rizon.");
+    assertEquals(kept.window.includes("Libera, cid 9"), true);
+    assertEquals(s.fake.received.filter((c) => c.action === "closewin").length, 1);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("irc_cleanup undoes only what the agent opened, in one call", async () => {
+  const s = await stack();
+  try {
+    growOnConnect(s, 7, "Rizon");
+    await s.client.callTool({
+      name: "irc_connect",
+      arguments: { network: "Rizon", server: "irc.rizon.net" },
+    });
+    s.fake.setHandler((cmd) =>
+      cmd.action === "join" ? { ok: true, data: { joined: "#bots", members: 9 } } : undefined
+    );
+    await s.client.callTool({ name: "irc_join", arguments: { cid: 1, channel: "#bots" } });
+
+    // The user's #chan and the agent's #bots on the user's connection, and the agent's Rizon.
+    const rizon = network({ cid: 7, name: "Rizon", channels: [], members: {} });
+    s.fake.setNetworks([network({ channels: ["#chan", "#bots"] }), rizon]);
+    s.fake.setHandler((cmd, fake) => {
+      if (cmd.action === "disconnect") {
+        fake.setNetworks([network(), { ...rizon, status: "disconnected" }]);
+      }
+      if (cmd.action === "closewin") fake.setNetworks([network()]);
+      return undefined;
+    });
+
+    const body = JSON.parse(
+      textOf(await s.client.callTool({ name: "irc_cleanup", arguments: {} })),
+    );
+    assertEquals(body.ok, true);
+    assertEquals(body.left, ["#bots on net1"]);
+    assertEquals(body.disconnected, ["Rizon (cid 7)"]);
+    assertEquals(body.closed, ["Rizon (cid 7)"]);
+    const acted = s.fake.received
+      .filter((c) => ["part", "disconnect", "closewin"].includes(c.action))
+      .map((c) => [c.action, c.params?.cid ?? null, c.params?.channel ?? null]);
+    assertEquals(acted, [["part", 1, "#bots"], ["disconnect", 7, null], ["closewin", null, null]]);
+
+    const again = JSON.parse(
+      textOf(await s.client.callTool({ name: "irc_cleanup", arguments: {} })),
+    );
+    assertEquals(again.done.startsWith("Nothing to clean up"), true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("irc_cleanup leaves the windows when one of them is the user's", async () => {
+  const s = await stack();
+  try {
+    growOnConnect(s, 7, "Rizon");
+    await s.client.callTool({
+      name: "irc_connect",
+      arguments: { network: "Rizon", server: "irc.rizon.net" },
+    });
+    const libera = network({ cid: 9, name: "Libera", status: "disconnected", channels: [] });
+    const rizon = network({ cid: 7, name: "Rizon", channels: [], members: {} });
+    s.fake.setNetworks([network(), rizon, libera]);
+    s.fake.setHandler((cmd, fake) => {
+      if (cmd.action === "disconnect") {
+        fake.setNetworks([network(), { ...rizon, status: "disconnected" }, libera]);
+      }
+      return undefined;
+    });
+
+    const body = JSON.parse(
+      textOf(await s.client.callTool({ name: "irc_cleanup", arguments: {} })),
+    );
+    assertEquals(body.disconnected, ["Rizon (cid 7)"]);
+    assertEquals(body.closed, []);
+    assertEquals(body.problems.join(" ").includes("Libera, cid 9"), true);
+    assertEquals(s.fake.received.some((c) => c.action === "closewin"), false);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("irc_connect takes a host passed as network for the server", async () => {
+  const s = await stack();
+  try {
+    growOnConnect(s, 7, "williamgattone");
+    const result = await s.client.callTool({
+      name: "irc_connect",
+      arguments: { network: "irc.williamgattone.it", tls: true },
+    });
+    assertEquals(result.isError ?? false, false);
+    const connect = s.fake.received.find((c) => c.action === "connect");
+    assertEquals(connect?.params?.server, "irc.williamgattone.it");
   } finally {
     await s.stop();
   }
@@ -986,14 +1082,18 @@ Deno.test("a session that does not exist says so, and to leave it out", async ()
   }
 });
 
-Deno.test("irc_disconnect says the window stays and how to close it", async () => {
+Deno.test("irc_disconnect keeps the window of a user's connection", async () => {
   const s = await stack();
   try {
-    s.mirc.registry.resolve()!.owned.openedConnection(1);
+    s.fake.setHandler((cmd, fake) => {
+      if (cmd.action === "disconnect") fake.setNetworks([network({ status: "disconnected" })]);
+      return undefined;
+    });
     const body = JSON.parse(textOf(
-      await s.client.callTool({ name: "irc_disconnect", arguments: { cid: 1 } }),
+      await s.client.callTool({ name: "irc_disconnect", arguments: { cid: 1, confirm: true } }),
     ));
-    assertEquals(body.window.includes("irc_close_windows"), true);
+    assertEquals(body.done.includes("stays open"), true);
+    assertEquals(s.fake.received.some((c) => c.action === "closewin"), false);
   } finally {
     await s.stop();
   }

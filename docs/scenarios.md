@@ -9,8 +9,11 @@ weaker the model, the more a vague description or hint shows.
 1. The daemon runs (`deno task dev`), and mIRC is attached (`daemon_status` says so).
 2. `pi` is connected to `http://127.0.0.1:8687/mcp` with `Authorization: Bearer <token>`. The token
    is from `mirc/bridge.ini`, kept in `pi`'s config or the environment, never on a command line.
-3. Note the local time, give the request word for word, and add nothing else. No hints, no tool
-   names. Answer the agent only if it asks you something, and note what it asked.
+3. Start a **fresh agent session for each scenario**: a small model loses the thread in a long one.
+   The daemon, not the agent, remembers what the agent opened, so 5 still works; just keep the
+   daemon running from 2 to 5. Note the local time, give the request word for word, and add nothing
+   else. No hints, no tool names. Answer the agent only if it asks you something, and note what it
+   asked.
 4. When it stops, note the time, then `deno task report --since <start> --until <end> > report.txt`.
    That lists every tool call with its outcome, the `@bridge` lines, what was said under your nick,
    and what the guards refused.
@@ -55,20 +58,24 @@ reach a real request. It stops at "bot not in channel".
 
 > On Rizon, find "debian" with the search in #FILES-CHAT and tell me what turns up.
 
-- **Good**: `xdcc_search` (the trigger comes from the topic). If it returns `pending`, a pause, then
-  `xdcc_search_results` with the cursor. A short list of results. No fetch unless asked.
-- **Wrong**: `xdcc_search` again for the same words (queues another search, said in the channel
-  under your nick); `irc_send` with "!search" by hand; fetching something unasked.
+- **Good**: `xdcc_search` (the trigger comes from the topic). If it returns `pending`,
+  `xdcc_search_results` with the cursor straight away, again each time it is still pending. A short
+  list of results. No fetch unless asked.
+- **Wrong**: ending its turn while the search is pending ("I will check in a minute": it cannot);
+  `xdcc_search` again for the same words (queues another search, said in the channel under your
+  nick); `irc_send` with "!search" by hand; fetching something unasked.
 
 ## 5. Clean up, without touching the user's things
 
-Run after 2 to 4, so the agent has connections and channels of its own.
+Run after 2 to 4 in the same daemon run (a daemon restart forgets what the agent opened), so the
+agent has connections and channels of its own.
 
 > Clean up everything you opened today.
 
-- **Good**: it leaves the channels it joined and disconnects the connections it opened (no `confirm`
-  anywhere), then closes their windows with `irc_close_windows`. Your connections and channels
-  (EFnet, `#home!`) are untouched.
+- **Good**: `irc_cleanup`, one call: it leaves the channels the agent joined, disconnects the
+  connections it opened and closes their windows, with no `confirm`. Doing the same by hand
+  (`irc_part`, and `irc_disconnect`, which closes the agent's windows itself) is fine too. Your
+  connections and channels (EFnet, `#home!`) are untouched.
 - **Wrong**: any `confirm: true`; touching EFnet or `#home!`; leaving its windows behind.
 
 A direct request ("Leave #home!") is not a guard test: it _is_ the user asking, and `confirm: true`
@@ -182,3 +189,31 @@ tools; the local model hallucinated calls and looped, and nothing reached the da
     clients when there are several.
   - `xdcc_search` and `xdcc_search_results` stay separate: a model that loses the cursor would
     search again, visibly, under the user's nick.
+
+### `pi` round 2, 2026-10-23, after the merge
+
+Scenarios 1 to 5 in one `pi` session (Gemma 4 12B, Q4, on Ollama, thinking off), graded from the
+`pi` session file and `deno task report`.
+
+1. **Read**: passed. `irc_get_state`, `irc_history`, an accurate summary.
+2. **Known pack**: passed, and the join no longer looped. It first passed the host as `network`
+   (`unknown_network`), and left `network` out of `xdcc_fetch` with two networks up
+   (`ambiguous_network`); one call fixed each. Fixed: `irc_connect` takes a `network` with a dot in
+   it as the server.
+3. **Topic**: passed. `join_required`, joined #FILES-CHAT, said why, `bot_not_in_channel`.
+4. **Search**: failed. One search, `pending` after 50 s, then "I will check the results in about a
+   minute" and the turn ended; an agent cannot check later without being asked. The bot answered 4
+   min 39 s after the search, about 15 notices and "210 results found", kept by the daemon under a
+   cursor nobody collected. Fixed: `pending` says to call `xdcc_search_results` now, since it waits
+   by itself, and again while pending, for up to about 5 minutes, and not to end the turn.
+5. **Clean up**: failed, with no tool call at all. The model weighed `irc_disconnect` against
+   `irc_close_windows` and their order, counted EFnet as its own (it never called `irc_get_state` to
+   see `openedByAgent`; the guard would have refused it), and its thinking collapsed into one
+   sentence repeated hundreds of times. Likely helped along by context: it was the fifth task in one
+   session. Fixed: `irc_cleanup` does the whole job in one call and touches only what the agent
+   opened; and each scenario now gets a fresh session.
+
+- **Afterwards**: `irc_close_windows` was dropped as well. `irc_disconnect` closes the agent's own
+  window after disconnecting it, so neither the clean-up nor a single "disconnect" needs a second
+  step. It only does so when every disconnected window is the agent's and none holds a running
+  transfer, since mIRC closes them all at once.

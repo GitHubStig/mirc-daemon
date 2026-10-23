@@ -518,7 +518,7 @@ const partSchema = z.object({
     .describe("Part message, as /part #chan <message>. Omit to leave without one."),
   confirm: confirmArg,
 });
-const closeWindowsSchema = z.object({ session: sessionArg, confirm: confirmArg });
+const cleanupSchema = z.object({ session: sessionArg });
 const modeSchema = z.object({
   session: sessionArg,
   network: networkArg,
@@ -713,7 +713,7 @@ type ConnectArgs = z.infer<typeof connectSchema>;
 type JoinArgs = z.infer<typeof joinSchema>;
 type PartArgs = z.infer<typeof partSchema>;
 type DisconnectArgs = z.infer<typeof disconnectSchema>;
-type CloseWindowsArgs = z.infer<typeof closeWindowsSchema>;
+type CleanupArgs = z.infer<typeof cleanupSchema>;
 type ModeArgs = z.infer<typeof modeSchema>;
 type WhoisArgs = z.infer<typeof whoisSchema>;
 type TopicArgs = z.infer<typeof topicSchema>;
@@ -1151,6 +1151,12 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     },
     ({ session, network, server, port, tls, password, second }: ConnectArgs) =>
       guarded(async () => {
+        // A network name has no dots; a host does. Seen with a small local
+        // model: told "on irc.williamgattone.it", it passed that as network.
+        if (server === undefined && network?.includes(".")) {
+          server = network;
+          network = undefined;
+        }
         const s = sessionOf(registry, session);
         await freshen(s, stateFreshnessMs);
         if (second !== true) {
@@ -1416,54 +1422,50 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
       }),
   );
 
-  tool(
-    "irc_close_windows",
-    {
-      description:
-        "Close every disconnected connection window in mIRC (each status window and everything " +
-        "in it), to tidy up after the agent. Connected and connecting windows are never " +
-        "touched; irc_disconnect first. mIRC can only close them all at once, so if any " +
-        "disconnected window is the user's, this needs confirm: true, and only when the user " +
-        "asked.",
-      inputSchema: closeWindowsSchema.shape,
-    },
-    ({ session, confirm }: CloseWindowsArgs) =>
-      guarded(async () => {
-        const s = sessionOf(registry, session);
-        // Fresh, not cached: this decides whose windows are about to go.
-        const refreshed = await s.refreshState();
-        if (refreshed) return failure(refreshed);
-        const idle = s.state.networks().filter((n) => n.status === "disconnected");
-        if (idle.length === 0) {
-          return json({ skipped: true, reason: "no disconnected windows", closed: [] });
-        }
-        const users = idle.filter((n) => !s.owned.ownsConnection(n.cid));
-        if (users.length > 0 && confirm !== true) {
-          return failure(
-            bridgeError(
-              "guard_denied",
-              "mIRC closes every disconnected window at once, and these are the user's: " +
-                users.map((n) => `cid ${n.cid} (${n.name})`).join(", ") +
-                ". Only close them if the user asked; then repeat with confirm: true.",
-            ),
-          );
-        }
-        const outcome = await s.commands.send("closewin");
-        if (!outcome.ok) return failure(outcome.error);
-        // The refresh also drops the closed windows' receipts.
-        const after = await s.refreshState();
-        if (after) return failure(after);
-        const left = new Set(s.state.networks().map((n) => n.cid));
-        const closed = idle.filter((n) => !left.has(n.cid));
-        if (closed.length > 0) {
-          s.note(
-            `closed ${closed.length} disconnected window${closed.length === 1 ? "" : "s"}: ` +
-              closed.map((n) => `${n.name} (cid ${n.cid})`).join(", "),
-          );
-        }
-        return json({ closed: closed.map((n) => ({ cid: n.cid, name: n.name })) });
-      }),
-  );
+  /**
+   * Close the agent's disconnected windows, after a disconnect. mIRC's
+   * `/close -it` closes every disconnected window at once, with what is open
+   * inside it, and nothing closes just one (STATE.md), so this only acts when
+   * every one of them is the agent's and none holds a running transfer.
+   * Otherwise it leaves them all and says why. There was once a tool that
+   * closed the user's too, with confirm; agents stumbled over the extra step,
+   * and the user can close their own windows in mIRC.
+   */
+  async function closeAgentWindows(
+    s: Session,
+  ): Promise<{ closed: string[]; leftOpen?: string } | BridgeError> {
+    // Fresh, not cached: this decides whose windows are about to go.
+    const refreshed = await s.refreshState();
+    if (refreshed) return refreshed;
+    const idle = s.state.networks().filter((n) => n.status === "disconnected");
+    if (!idle.some((n) => s.owned.ownsConnection(n.cid))) return { closed: [] };
+    const users = idle.filter((n) => !s.owned.ownsConnection(n.cid));
+    if (users.length > 0) {
+      return {
+        closed: [],
+        leftOpen: "The agent's disconnected window stays open: mIRC can only close every " +
+          "disconnected window at once, and some are the user's (" +
+          users.map((n) => `${n.name}, cid ${n.cid}`).join("; ") + "). Nothing to do about it.",
+      };
+    }
+    const busy = idle.filter((n) => s.dcc.active().some((j) => j.cid === n.cid));
+    if (busy.length > 0) {
+      return {
+        closed: [],
+        leftOpen: "The disconnected windows stay open: closing them would also end the transfer " +
+          "still running in " + busy.map((n) => `${n.name} (cid ${n.cid})`).join(", ") + ".",
+      };
+    }
+    const outcome = await s.commands.send("closewin");
+    if (!outcome.ok) return outcome.error;
+    // The refresh also drops the closed windows' receipts.
+    const after = await s.refreshState();
+    if (after) return after;
+    const remaining = new Set(s.state.networks().map((n) => n.cid));
+    const closed = idle.filter((n) => !remaining.has(n.cid)).map((n) => `${n.name} (cid ${n.cid})`);
+    if (closed.length > 0) s.note(`closed the agent's windows: ${closed.join(", ")}`);
+    return { closed };
+  }
 
   tool(
     "irc_disconnect",
@@ -1471,8 +1473,10 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
       description:
         "Disconnect from a network, only when the user asked or the task they gave includes it " +
         "(e.g. 'get pack 5, then disconnect'). A finished transfer is NOT a reason to disconnect " +
-        "by itself. Connections the agent opened need no confirmation; the user's own need " +
-        "confirm: true. Quits with mIRC's own default message unless one is given.",
+        "by itself. Connections the agent opened need no confirmation, and their window is " +
+        "closed too; the user's own need confirm: true, and keep their window. Quits with " +
+        "mIRC's own default message unless one is given. To undo everything the agent opened, " +
+        "irc_cleanup does it in one call.",
       inputSchema: disconnectSchema.shape,
     },
     ({ session, network, cid, message, confirm }: DisconnectArgs) =>
@@ -1496,15 +1500,105 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         });
         if (!outcome.ok) return failure(outcome.error);
         s.note(`disconnected from ${net.name} (cid ${net.cid})`);
+        // Seen with real agents: told to clean up, they disconnected and left
+        // the windows behind, or went round in circles over a separate step to
+        // close them. So the agent's own window goes with its connection.
+        if (s.owned.ownsConnection(net.cid)) {
+          const windows = await closeAgentWindows(s);
+          if ("code" in windows) return failure(windows);
+          return json({
+            ok: true,
+            done: windows.closed.length > 0
+              ? `Disconnected from ${net.name} and closed its window.`
+              : `Disconnected from ${net.name}.`,
+            ...(windows.leftOpen ? { window: windows.leftOpen } : {}),
+          });
+        }
         const error = await s.refreshState();
         if (error) return failure(error);
         return json({
           ok: true,
+          done: `Disconnected from ${net.name}. Its window stays open: it is the user's.`,
           network: s.state.byCid(net.cid) ?? null,
-          // Seen with a real agent: told to clean up, it disconnected and left the
-          // windows behind, never knowing they stay.
-          window: "The connection's window stays open in mIRC, disconnected. irc_close_windows " +
-            "closes it, if tidying up is part of what the user asked.",
+        });
+      }),
+  );
+
+  tool(
+    "irc_cleanup",
+    {
+      description:
+        "Undo what the agent opened, in one call, when the user asks to clean up: leaves the " +
+        "channels it joined on the user's connections, disconnects the connections it opened, " +
+        "and closes their windows. Never touches the user's own channels, connections or " +
+        "windows, and needs no other tool before or after it. A connection with a transfer " +
+        "still running is left alone, and the answer says so.",
+      inputSchema: cleanupSchema.shape,
+    },
+    ({ session }: CleanupArgs) =>
+      guarded(async () => {
+        const s = sessionOf(registry, session);
+        // Fresh, not cached: this decides what is about to go.
+        const refreshed = await s.refreshState();
+        if (refreshed) return failure(refreshed);
+
+        const left: string[] = [];
+        const disconnected: string[] = [];
+        const kept: string[] = [];
+        const problems: string[] = [];
+        for (const net of s.state.networks()) {
+          if (!s.owned.ownsConnection(net.cid)) {
+            // The user's connection: only the channels the agent joined go.
+            for (const channel of net.channels.filter((c) => s.owned.ownsChannel(net.cid, c))) {
+              const outcome = await s.commands.send("part", { cid: net.cid, channel });
+              if (outcome.ok) {
+                s.note(`left ${channel} on ${net.name}`);
+                left.push(`${channel} on ${net.name}`);
+              } else {
+                problems.push(`could not leave ${channel} on ${net.name}: ${outcome.error.hint}`);
+              }
+            }
+            continue;
+          }
+          // Closing a connection's window takes what is open inside it, so a
+          // running download would go with it.
+          const running = s.dcc.active().filter((j) => j.cid === net.cid);
+          if (running.length > 0) {
+            kept.push(
+              `${net.name} (cid ${net.cid}): ${running.map((j) => j.id).join(", ")} still ` +
+                "running; tell the user, and stop it with xdcc_cancel only if they ask",
+            );
+            continue;
+          }
+          if (net.status === "disconnected") continue;
+          const outcome = await s.commands.send("disconnect", { cid: net.cid }, {
+            timeoutMs: 15_000,
+          });
+          if (outcome.ok) {
+            s.note(`disconnected from ${net.name} (cid ${net.cid})`);
+            disconnected.push(`${net.name} (cid ${net.cid})`);
+          } else {
+            problems.push(`could not disconnect ${net.name}: ${outcome.error.hint}`);
+          }
+        }
+
+        const windows = await closeAgentWindows(s);
+        if ("code" in windows) return failure(windows);
+        const closed = windows.closed;
+        if (windows.leftOpen) problems.push(windows.leftOpen);
+
+        const nothing = left.length + disconnected.length + closed.length === 0;
+        return json({
+          ok: problems.length === 0,
+          done: nothing && kept.length === 0 && problems.length === 0
+            ? "Nothing to clean up: the agent has no channels, connections or windows of its own."
+            : "Cleaned up. The user's own channels and connections were not touched. Tell the " +
+              "user what was done; nothing else needs calling.",
+          left,
+          disconnected,
+          closed,
+          kept,
+          problems,
         });
       }),
   );
@@ -1900,10 +1994,15 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         pending: true,
         cursor,
         results: [],
-        next: "No answer yet. Search bots queue searches: one took about two minutes live. Do " +
-          "NOT search again, which only queues another; call xdcc_search_results " +
-          "{cursor: " + cursor + ", channel: " + JSON.stringify(channel) + "} in a minute or so. " +
-          "Replies that arrive meanwhile are kept.",
+        // Seen with a small local model: told to call back "in a minute or so",
+        // it ended its turn promising to check, and never did. The bot answered
+        // 4.6 minutes after the search, into a cursor nobody collected.
+        next: "No answer yet; search bots queue searches, and one took 4.6 minutes. Call " +
+          "xdcc_search_results {cursor: " + cursor + ", channel: " + JSON.stringify(channel) +
+          "} now: it waits up to ~50 s by itself. Each time it comes back pending, call it " +
+          "again with the same cursor, for up to about 5 minutes, before telling the user " +
+          "nothing came back. Do not end your turn to check later: nothing is collected until " +
+          "you call. Do NOT search again, which only queues another search.",
       });
     }
     const results = replies
@@ -2012,7 +2111,8 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
       description:
         "Collect the results of an earlier xdcc_search, from the cursor it returned. Sends " +
         "nothing: use this rather than searching again when a search bot is slow. Waits up to " +
-        "~50 s for replies that have not come yet.",
+        "~50 s for replies that have not come yet; call it again while it says pending. " +
+        "Replies are kept, so nothing is lost by a late call.",
       inputSchema: xdccSearchResultsSchema.shape,
     },
     ({ session, network, cid, channel, cursor, timeoutMs, quietMs }: XdccSearchResultsArgs) =>

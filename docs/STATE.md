@@ -118,7 +118,8 @@ Proven by running it, with evidence in the log:
     `irc_get_state`;
   - reading and waiting: `irc_read`, `irc_history`, `irc_wait_for`, `irc_members`, `irc_ison`,
     `irc_whois`;
-  - connections: `irc_connect`, `irc_disconnect`, `irc_nick`, `irc_close_windows`;
+  - connections: `irc_connect`, `irc_disconnect`, `irc_nick`, `irc_cleanup` (undoes everything the
+    agent opened, in one call);
   - channels: `irc_join`, `irc_part`, `irc_topic`, `irc_mode`;
   - speaking: `irc_send` (a NOTICE with `notice: true`), `irc_notify`;
   - DCC and XDCC: `irc_dcc_status` (waits for a change with `wait: true`), `xdcc_list`,
@@ -127,8 +128,8 @@ Proven by running it, with evidence in the log:
 
   Near-duplicates were merged (ADR-0005): `irc_connect` absorbed `irc_ensure_connected`, `irc_join`
   absorbed `irc_ensure_joined`, `irc_send` absorbed `irc_notice`, `irc_dcc_status` absorbed
-  `irc_dcc_watch`, and `irc_list_sessions` went. A small local model looped on the choice between
-  two joins.
+  `irc_dcc_watch`, `irc_disconnect` closes the agent's own window (so `irc_close_windows` went), and
+  `irc_list_sessions` went. A small local model looped on the choice between two joins.
 - **The mSL script** sends and receives: the read loop drains, dispatch parses, replies go out.
 - **Protocol v2 in mIRC** (2026-10-22): the hello carries `"v":2` and is accepted. `/bridge.diag`
   prints `jval-test t=cmdid=c1action=state` (the pieces are joined without spaces; the values are
@@ -308,9 +309,12 @@ Proven by running it, with evidence in the log:
     to `#home!` by the user's EFnet auto-join.
 - **Closing windows** (2026-10-23). mIRC's `/close -it` closes every status window that is neither
   connected nor connecting, on every connection at once, with what is open inside it. Nothing tried
-  closes just one: `/window -c` on a status window does nothing. So `irc_close_windows` closes all
-  disconnected windows. It refreshes first, and refuses without `confirm: true` if any of them is
-  the user's, naming them. Live: an agent window was opened, disconnected and closed in 41 ms.
+  closes just one: `/window -c` on a status window does nothing. So the agent's window is closed
+  only when every disconnected window is the agent's and none holds a running transfer:
+  `irc_disconnect` does it for the agent's own connection, and `irc_cleanup` after its disconnects.
+  (A separate `irc_close_windows`, which could close the user's too with `confirm`, was dropped:
+  agents stumbled over the extra step.) Live: an agent window was opened, disconnected and closed in
+  41 ms.
 
 - **A channel's topic comes before an XDCC request** (2026-10-23, Abjects, the user's connection,
   with their go-ahead; nothing was downloaded). Some XDCC channels ban anyone who downloads without
@@ -381,17 +385,18 @@ Proven by running it, with evidence in the log:
   - **A local model in `pi`**, a much weaker model than Haiku. In `pi`'s default `codemod` mode it
     never got a call through; in `direct` mode it does. Scenario 1 passes, including the empty
     scrollback line (trap 18), confirmed live. Scenario 2 looped on joining the channel, which led
-    to merging the near-duplicate tools (see "The tools" above, and scenarios.md).
+    to merging the near-duplicate tools (see "The tools" above); after that, 2 and 3 pass. Round 2
+    led to `irc_cleanup` and to search answers that say to collect at once (scenarios.md).
   - **Claude Haiku in Claude Code**, run from an empty folder so it could not read the source, took
     three rounds to pass every scenario. Findings and fixes are in scenarios.md. The largest was
     that Haiku picked `irc_connect` over `irc_ensure_connected` and never checked state, which could
     have opened a second connection to a network the user was on. The two tools are now one, which
     reuses by network and closes a new connection again if it duplicates one.
   - The others: `irc_read` names a channel that does not exist and says how far back it sees; the
-    new `irc_history` reads mIRC's own scrollback (`$line`); `irc_disconnect` says the window stays
-    and `irc_close_windows` closes it; `irc_history` says when its reply was capped; `xdcc_list`
-    ends at once on "no such nick"; a bot command typed into a channel warns that replies come
-    privately and points at `xdcc_search`.
+    new `irc_history` reads mIRC's own scrollback (`$line`); `irc_disconnect` now closes the agent's
+    window itself; `irc_history` says when its reply was capped; `xdcc_list` ends at once on "no
+    such nick"; a bot command typed into a channel warns that replies come privately and points at
+    `xdcc_search`.
 
 ## Not verified
 
@@ -570,9 +575,10 @@ minimised **`@bridge`** window, not the active channel. Available while debuggin
 
 0. **Every scenario passing under `pi`** (direct mode, the local model). Haiku passes them all after
    three rounds; `pi`'s model is much weaker, so it shows vague descriptions and unhelpful answers
-   that Haiku gets past. Scenario 1 passes. Next, rerun scenario 2 against the merged tools, then
-   the rest, and record each round in scenarios.md. Fix in the tool descriptions and answers, never
-   by hinting in the request.
+   that Haiku gets past. Round 2 passed 1 to 3 and failed 4 (ended its turn while a search was
+   pending) and 5 (no call at all); both are addressed. Next, rerun 4 and 5, then all of them, each
+   in a fresh `pi` session, and record each round in scenarios.md. Fix in the tool descriptions and
+   answers, never by hinting in the request.
 1. **Close the remaining live gaps when they happen**: a bot's queue, and a real stall. Neither can
    be found on demand. When the user reports one, read the log for that window: every bot reply, DCC
    event and 15 s progress poll is in it. A stall can also be staged: the user's mIRC sends itself
