@@ -64,6 +64,10 @@ export interface ToolOptions {
   connectWaitMs?: number;
   /** The pause between joining and searching; tests shorten it. */
   searchSettleMs?: number;
+  /** How long xdcc_fetch waits for an offer after an unread reply; tests shorten it. */
+  offerGraceMs?: number;
+  /** How long xdcc_fetch waits for a resume's ACCEPT after the offer; tests shorten it. */
+  resumeGraceMs?: number;
 }
 
 interface ToolResult {
@@ -754,6 +758,8 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
   const { registry, stateFreshnessMs, allowRaw } = options;
   const connectWaitMs = options.connectWaitMs ?? CONNECT_WAIT_MS;
   const searchSettleMs = options.searchSettleMs ?? SEARCH_SETTLE_MS;
+  const offerGraceMs = options.offerGraceMs ?? OFFER_GRACE_MS;
+  const resumeGraceMs = options.resumeGraceMs ?? RESUME_GRACE_MS;
 
   /**
    * Register one tool, logging every invocation.
@@ -2434,7 +2440,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
             s,
             job,
             (j) => j.state !== "requested",
-            Math.min(OFFER_GRACE_MS, Math.max(0, deadline - Date.now())),
+            Math.min(offerGraceMs, Math.max(0, deadline - Date.now())),
           );
           if (s.closed.aborted) return linkDropped();
         }
@@ -2447,11 +2453,11 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
             s,
             job,
             (j) => j.resumedFrom !== undefined || j.state !== "offered",
-            Math.min(RESUME_GRACE_MS, Math.max(0, deadline - Date.now())),
+            Math.min(resumeGraceMs, Math.max(0, deadline - Date.now())),
           );
           // A re-check of a complete file ends within about a second; wait for it.
           if (alreadyHad(job) && job.state === "offered") {
-            await waitForJob(s, job, (j) => j.state !== "offered", RESUME_GRACE_MS);
+            await waitForJob(s, job, (j) => j.state !== "offered", resumeGraceMs);
           }
           if (s.closed.aborted) return linkDropped();
         }
