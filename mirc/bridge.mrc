@@ -57,6 +57,15 @@ alias -l bridge_say {
   echo -t @bridge * bridge: $1-
 }
 
+; What the agent just did, for a user watching mIRC: why a window opened or
+; closed, what was said under their nick. The daemon decides what is worth a
+; line; this only prints it. Seen live: a channel window vanished when the
+; agent left it, with nothing to say why.
+alias -l bridge_note {
+  if (!$window(@bridge)) window -n @bridge
+  echo -t @bridge * agent: $1-
+}
+
 ; --- JSON out -------------------------------------------------------------
 ; Built from $chr() constants: a literal { at the start of a token would open a
 ; block, and a literal quote would end the string.
@@ -360,6 +369,13 @@ alias -l bridge_command {
   ; on all connections at once; nothing tried closes just one (/window -c on a
   ; status window does nothing). The daemon decides whether that is allowed.
   if (%act == closewin) { close -it | bridge_ok %id | return }
+  if (%act == note) { bridge_note $jparam(%f, text) | bridge_ok %id | return }
+  ; Sent and acknowledged at once; what the server says back arrives as raw
+  ; events (324, 311-318, refusals), which the daemon reads. Without modes,
+  ; MODE asks for the channel's current ones.
+  if (%act == mode) { mode $jparam(%f, target) $jparam(%f, modes) | bridge_ok %id | return }
+  if (%act == whois) { whois $jparam(%f, nick) | bridge_ok %id | return }
+  if (%act == topic) { bridge_do_topic %id $jparam(%f, channel) $jparam(%f, text) | return }
   bridge_fail %id 0 unknown-action-$+(%act)
 }
 
@@ -467,6 +483,15 @@ alias bridge_ison_timeout {
 ; it names, so the daemon reads it before requesting anything. Capped at 400
 ; characters: IRC allows about 390, and jstr can grow a coloured one a lot.
 alias -l bridge_topickv { return $kvo(topic, $jstr($left($chan($1).topic, 400))) }
+
+; $1 = id, $2 = channel, $3- = new topic. With a topic, it is sent and the
+; server's echo (a TOPIC event) or refusal answers it on the daemon's side.
+; Without, mIRC's own record of the topic is the answer.
+alias -l bridge_do_topic {
+  if ($3- != $null) { topic $2 $3- | bridge_ok $1 | return }
+  if ($me !ison $2) { bridge_fail $1 0 not-on-channel | return }
+  bridge_ok $1 $bridge_topickv($2)
+}
 
 alias -l bridge_do_join {
   ; Joining a channel we are already in makes the server say nothing at all, so

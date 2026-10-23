@@ -61,6 +61,8 @@ export interface EventFields {
   nick?: string;
   user?: string;
   text?: string;
+  /** For kind "raw": the numeric and its parameters, as bridge_mirror_raw sends them. */
+  raw?: string;
   extra?: Record<string, unknown>;
 }
 
@@ -122,6 +124,7 @@ export class FakeMirc {
       nick: fields.nick,
       user: fields.user,
       text: fields.text,
+      raw: fields.raw,
       extra: fields.extra,
     });
   }

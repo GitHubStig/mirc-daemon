@@ -4,8 +4,67 @@ import {
   classifyBotReply,
   parseDccAccept,
   parseDccOffer,
+  parseSearchResult,
   plainText,
+  searchTotal,
+  searchTrigger,
+  triggersIn,
 } from "../src/core/xdcc.ts";
+
+// Rizon #FILES-CHAT, 2026-10-23, as [XB]-L0VE answered `!search romance` and
+// `!search multiplier mindset` (colour codes kept).
+const RESULT_LINE = "\x0311,1   Some_Artist-Afro_House_Romance-(7489823)-WEB-2026-XB " +
+  "\x0312 (\x0315Command: \x030 /msg [XB]Ongaku XDCC SEND #29557 \x0312 ) \x0314Gets:\x0315 2 " +
+  "\x0314Size:\x0315 97.3M \x0f";
+const RESULT_TAGGED = "\x0311,1   [ example.org ] Office Romance 2026 720p Sample Cut " +
+  "Home Edition \x0312 (\x0315Command: \x030 /msg PackBot XDCC SEND #66967 \x0312 ) " +
+  "\x0314Gets:\x0315 0 \x0314Size:\x0315 6.2G \x0f";
+
+Deno.test("a search result line gives the bot, pack, name, size and gets", () => {
+  assertEquals(parseSearchResult(RESULT_LINE), {
+    bot: "[XB]Ongaku",
+    pack: "29557",
+    name: "Some_Artist-Afro_House_Romance-(7489823)-WEB-2026-XB",
+    size: "97.3M",
+    gets: 2,
+  });
+  assertEquals(
+    parseSearchResult(RESULT_TAGGED)?.name,
+    "[ example.org ] Office Romance 2026 720p Sample Cut Home Edition",
+  );
+  assertEquals(parseSearchResult(RESULT_TAGGED)?.bot, "PackBot");
+  // A simpler common format: "#12 [700M] file.mkv /msg Bot xdcc send #12".
+  assertEquals(parseSearchResult("[700M] debian-12.iso - /msg Bot xdcc send #12"), {
+    bot: "Bot",
+    pack: "12",
+    name: "[700M] debian-12.iso",
+    size: "700M",
+  });
+});
+
+Deno.test("lines that are not results are not taken for one, and the total is read", () => {
+  assertEquals(
+    parseSearchResult("\x030,1   No results were found. \x0312-\x0314 Try reducing keywords."),
+    undefined,
+  );
+  assertEquals(
+    searchTotal("\x030,1 445 \x0315results found out of 829094 \x0312- \x0315Add more keywords"),
+    445,
+  );
+});
+
+Deno.test("search triggers are read from a topic, and the searching one is picked", () => {
+  // #FILES-CHAT's topic, as the join returned it, colour codes and all.
+  const topic =
+    "\x031 \x0311,1\x02:: \x0314,1FiLES \x0311::\x02 \x030Search: \x02\x0311ONLINE" +
+    "\x02\x031|\x030Triggers: \x0315\x02!help\x02 !search !latest !recommended !hot \x0311 join " +
+    "#helpers if you want to help serve files \x0f";
+  const triggers = triggersIn(topic);
+  assertEquals(triggers.slice(0, 3), ["!help", "!search", "!latest"]);
+  assertEquals(searchTrigger(triggers), "!search");
+  assertEquals(searchTrigger(triggersIn("Use @find <words> to look for packs")), "@find");
+  assertEquals(searchTrigger(triggersIn("!help !rules")), undefined);
+});
 
 Deno.test("channel names are found in a topic in any wording, and pack numbers are not", () => {
   assertEquals(

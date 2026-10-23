@@ -122,6 +122,70 @@ export function channelsIn(topic: string): string[] {
   return found;
 }
 
+/**
+ * Search triggers a topic lists, e.g. "Triggers: !help !search !latest" or
+ * "@find". A `!` or `@` word is syntax, not wording; which one searches is
+ * guessed from the word (search, find, s) and otherwise left to the agent.
+ */
+export function triggersIn(topic: string): string[] {
+  const found: string[] = [];
+  for (const m of plainText(topic).matchAll(/(?:^|[\s,(\[|/:])([!@][a-z][\w-]*)/gi)) {
+    if (!found.some((f) => f.toLowerCase() === m[1].toLowerCase())) found.push(m[1]);
+  }
+  return found;
+}
+
+/** The trigger that searches, when one plainly does: !search, @find, !s. */
+export function searchTrigger(triggers: readonly string[]): string | undefined {
+  return triggers.find((t) => /^[!@](search|find|s|srch)$/i.test(t)) ??
+    triggers.find((t) => /search|find/i.test(t));
+}
+
+export interface SearchResult {
+  /** The bot holding the pack: who to ask, with xdcc_fetch. */
+  bot: string;
+  pack: string;
+  /** The file or release name, as the search bot wrote it. */
+  name: string;
+  size?: string;
+  /** How many times it was downloaded, when the bot says. */
+  gets?: number;
+}
+
+/**
+ * One search result line. The fixed part is the XDCC command the result tells
+ * you to type, "/msg <bot> xdcc send #<n>", which bots copy verbatim whatever
+ * their language; the name is what comes before it. Seen live (Rizon,
+ * #FILES-CHAT, 2026-10-23):
+ *   "Office_Romance… ( Command: /msg PackBot XDCC SEND #66967 ) Gets: 0 Size: 6.2G"
+ */
+export function parseSearchResult(text: string): SearchResult | undefined {
+  const plain = plainText(text);
+  const cmd = /\/msg\s+(\S+)\s+xdcc\s+(?:send|get)\s+#?(\d+)/i.exec(plain);
+  if (!cmd) return undefined;
+  const name = plain.slice(0, cmd.index)
+    .replace(/[(\[]?\s*(command|cmd)\s*:?\s*$/i, "")
+    .replace(/[\s(\[|:-]+$/, "")
+    .trim();
+  const after = plain.slice(cmd.index + cmd[0].length);
+  const size = /\bsize\s*:?\s*([\d.,]+\s*[KMGT]i?B?)/i.exec(after)?.[1] ??
+    /\[\s*([\d.,]+\s*[KMGT]i?B?)\s*\]/i.exec(plain)?.[1];
+  const gets = /\bgets?\s*:?\s*(\d+)/i.exec(after)?.[1];
+  return {
+    bot: cmd[1],
+    pack: cmd[2],
+    name,
+    ...(size ? { size: size.replace(/\s+/g, "") } : {}),
+    ...(gets ? { gets: Number(gets) } : {}),
+  };
+}
+
+/** "445 results found out of 829094" → 445: how many there were, of which few are shown. */
+export function searchTotal(text: string): number | undefined {
+  const m = /(\d[\d,]*)\s+(?:results?|matches|hits)\b/i.exec(plainText(text));
+  return m ? Number(m[1].replace(/,/g, "")) : undefined;
+}
+
 export interface DccOffer {
   file: string;
   /** Bytes, when the offer says (it normally does). */

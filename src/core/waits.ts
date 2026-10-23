@@ -40,6 +40,11 @@ export interface WaitMatcher {
    * "anything from the bot" would take an advert for the reply.
    */
   direct?: boolean;
+  /**
+   * Anything the fields above cannot say, e.g. "a raw 324 for this channel".
+   * For the tool layer only: an agent's irc_wait_for cannot pass code.
+   */
+  test?: (event: BridgeEvent) => boolean;
 }
 
 /** IRC channel prefixes; anything else in `buf` is a query nick. */
@@ -60,6 +65,7 @@ export function matchesWait(event: BridgeEvent, matcher: WaitMatcher): boolean {
     const haystack = searchableText(event);
     if (!haystack.includes(matcher.pattern.toLowerCase())) return false;
   }
+  if (matcher.test !== undefined && !matcher.test(event)) return false;
   return true;
 }
 

@@ -77,6 +77,10 @@ const NUMERIC_RULES: Record<number, NumericRule> = {
   474: { code: "join_failed", hint: () => "you are banned from that channel." },
   475: { code: "join_failed", hint: () => "the channel requires a key." },
   477: { code: "join_failed", hint: () => "the channel requires a registered nick." },
+  472: {
+    code: "server_error",
+    hint: () => "this server does not support that mode letter; check the network's modes.",
+  },
   482: { code: "server_error", hint: () => "you are not a channel operator there." },
 };
 

@@ -172,6 +172,7 @@ Deno.test("the MCP surface advertises the tools an agent needs", async () => {
         "irc_ison",
         "irc_join",
         "irc_members",
+        "irc_mode",
         "irc_notice",
         "irc_notify",
         "irc_part",
@@ -181,6 +182,8 @@ Deno.test("the MCP surface advertises the tools an agent needs", async () => {
         "irc_wait_for",
         "xdcc_fetch",
         "xdcc_list",
+        "xdcc_search",
+        "xdcc_search_results",
       ]
     ) {
       assertEquals(names.includes(expected), true, `missing tool: ${expected}`);
@@ -787,6 +790,108 @@ Deno.test("irc_close_windows closes the agent's idle windows; the user's need co
     assertEquals(textOf(users).startsWith("guard_denied:"), true);
     assertEquals(textOf(users).includes("cid 9 (Libera)"), true);
     assertEquals(s.fake.received.filter((c) => c.action === "closewin").length, before);
+  } finally {
+    await s.stop();
+  }
+});
+
+/** A raw reply as bridge.mrc mirrors it. */
+function emitRaw(s: Stack, line: string): void {
+  s.fake.emit("raw", { raw: line, extra: { numeric: Number(line.split(" ")[0]) } });
+}
+
+Deno.test("irc_mode reports the modes the server then shows, or its refusal", async () => {
+  const s = await stack();
+  try {
+    const session = s.mirc.registry.resolve()!;
+    session.owned.joinedChannel(1, "#t");
+    let op = true;
+    s.fake.setHandler((cmd) => {
+      if (cmd.action !== "mode") return undefined;
+      // As a server answers: a refusal for the change, then 324 for the query.
+      if (cmd.params?.modes && !op) emitRaw(s, "482 me #t You're not channel operator");
+      if (!cmd.params?.modes) emitRaw(s, op ? "324 me #t +tni" : "324 me #t +tn");
+      return { ok: true };
+    });
+
+    const done = JSON.parse(textOf(
+      await s.client.callTool({ name: "irc_mode", arguments: { channel: "#t", modes: "+i" } }),
+    ));
+    assertEquals(done, { ok: true, channel: "#t", modes: "+tni" });
+
+    op = false;
+    const refused = await s.client.callTool({
+      name: "irc_mode",
+      arguments: { channel: "#t", modes: "+i" },
+    });
+    assertEquals(textOf(refused).includes("not a channel operator"), true);
+
+    // The user's channel needs their say-so.
+    const users = await s.client.callTool({
+      name: "irc_mode",
+      arguments: { channel: "#chan", modes: "+i" },
+    });
+    assertEquals(textOf(users).startsWith("guard_denied:"), true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("irc_whois collects the replies up to 318, and 401 is nick_not_found", async () => {
+  const s = await stack();
+  try {
+    s.fake.setHandler((cmd) => {
+      if (cmd.action !== "whois") return undefined;
+      if (cmd.params?.nick === "ghost") {
+        emitRaw(s, "401 me ghost No such nick/channel");
+        emitRaw(s, "318 me ghost End of /WHOIS list.");
+      } else {
+        emitRaw(s, "311 me Bot ~bot bots.example * XDCC Bot");
+        emitRaw(s, "319 me Bot @#chan");
+        emitRaw(s, "311 me Other ~o other.example * Someone else");
+        emitRaw(s, "318 me Bot End of /WHOIS list.");
+      }
+      return { ok: true };
+    });
+    const info = JSON.parse(textOf(
+      await s.client.callTool({ name: "irc_whois", arguments: { nick: "bot" } }),
+    ));
+    assertEquals(info.user, "~bot");
+    assertEquals(info.realName, "XDCC Bot");
+    assertEquals(info.channels, ["@#chan"]);
+
+    const ghost = await s.client.callTool({ name: "irc_whois", arguments: { nick: "ghost" } });
+    assertEquals(textOf(ghost).startsWith("nick_not_found:"), true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("irc_topic reads from mIRC, and sets only the agent's channels without confirm", async () => {
+  const s = await stack();
+  try {
+    s.mirc.registry.resolve()!.owned.joinedChannel(1, "#t");
+    s.fake.setHandler((cmd, fake) => {
+      if (cmd.action !== "topic") return undefined;
+      if (cmd.params?.text === undefined) return { ok: true, data: { topic: "be nice" } };
+      fake.emit("topic", { buf: "#t", nick: "me", text: String(cmd.params.text) });
+      return { ok: true };
+    });
+    const read = JSON.parse(textOf(
+      await s.client.callTool({ name: "irc_topic", arguments: { channel: "#chan" } }),
+    ));
+    assertEquals(read.topic, "be nice");
+
+    const set = JSON.parse(textOf(
+      await s.client.callTool({ name: "irc_topic", arguments: { channel: "#t", text: "testing" } }),
+    ));
+    assertEquals(set, { ok: true, channel: "#t", topic: "testing" });
+
+    const users = await s.client.callTool({
+      name: "irc_topic",
+      arguments: { channel: "#chan", text: "mine now" },
+    });
+    assertEquals(textOf(users).startsWith("guard_denied:"), true);
   } finally {
     await s.stop();
   }
@@ -1427,6 +1532,105 @@ Deno.test("irc_ensure_joined returns the topic, even for a channel already joine
     ));
     assertEquals(body.skipped, true);
     assertEquals(body.topic, "Be in #Chat-Main too.");
+  } finally {
+    await s.stop();
+  }
+});
+
+// --- searching -----------------------------------------------------------------------
+
+Deno.test("xdcc_search takes the trigger from the topic and returns the results", async () => {
+  const s = await stack();
+  try {
+    s.fake.setHandler((cmd, fake) => {
+      if (cmd.action === "join") {
+        return {
+          ok: true,
+          data: { joined: "#chat", members: 600, topic: "Triggers: !help !search !latest" },
+        };
+      }
+      if (cmd.action === "msg" && cmd.params?.text === "!search romance") {
+        const say = (text: string, ms: number) =>
+          setTimeout(() => fake.emit("notice", { buf: "Finder", nick: "Finder", text }), ms);
+        say("Search for romance", 20);
+        say("Romance Sample 1993 ( Command: /msg Bot1 XDCC SEND #7 ) Gets: 3 Size: 24.7G", 40);
+        say("Romance_EP-WEB-2025 ( Command: /msg Bot2 XDCC SEND #8 ) Gets: 0 Size: 41.2M", 60);
+        say("445 results found out of 829094 - Add more keywords", 80);
+      }
+      return undefined;
+    });
+    const body = JSON.parse(textOf(
+      await s.client.callTool({
+        name: "xdcc_search",
+        arguments: { channel: "#chat", query: "romance", quietMs: 300 },
+      }),
+    ));
+    assertEquals(body.trigger, "!search");
+    assertEquals(body.results.map((r: { bot: string; pack: string }) => [r.bot, r.pack]), [
+      ["Bot1", "7"],
+      ["Bot2", "8"],
+    ]);
+    assertEquals(body.total, 445);
+    assertEquals(body.said.length, 2);
+    assertEquals(body.next.includes("Only 2 of 445"), true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("a slow search bot: xdcc_search hands back a cursor, xdcc_search_results the rest", async () => {
+  // Live on Rizon the results took about two minutes; here, longer than the wait.
+  const s = await stack();
+  try {
+    s.fake.setHandler((cmd) =>
+      cmd.action === "join"
+        ? { ok: true, data: { joined: "#chat", members: 600, topic: "Triggers: !search" } }
+        : undefined
+    );
+    const first = JSON.parse(textOf(
+      await s.client.callTool({
+        name: "xdcc_search",
+        arguments: { channel: "#chat", query: "debian", timeoutMs: 500 },
+      }),
+    ));
+    assertEquals(first.pending, true);
+    assertEquals(first.next.includes("Do NOT search again"), true);
+
+    // The answer arrives between calls, and is kept.
+    s.fake.emit("notice", {
+      buf: "Finder",
+      nick: "Finder",
+      text: "debian-12.iso ( Command: /msg Bot XDCC SEND #3 ) Gets: 1 Size: 631M",
+    });
+    const later = JSON.parse(textOf(
+      await s.client.callTool({
+        name: "xdcc_search_results",
+        arguments: { channel: "#chat", cursor: first.cursor, quietMs: 200 },
+      }),
+    ));
+    assertEquals(later.results.map((r: { pack: string }) => r.pack), ["3"]);
+    // Asked only once.
+    assertEquals(s.fake.received.filter((c) => c.action === "msg").length, 1);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("xdcc_search says so when the topic does not show how to search", async () => {
+  const s = await stack();
+  try {
+    s.fake.setHandler((cmd) =>
+      cmd.action === "join"
+        ? { ok: true, data: { joined: "#chat", members: 9, topic: "Welcome! !rules apply" } }
+        : undefined
+    );
+    const result = await s.client.callTool({
+      name: "xdcc_search",
+      arguments: { channel: "#chat", query: "x" },
+    });
+    assertEquals(textOf(result).startsWith("unknown_trigger:"), true);
+    assertEquals(textOf(result).includes("!rules"), true);
+    assertEquals(s.fake.received.some((c) => c.action === "msg"), false);
   } finally {
     await s.stop();
   }

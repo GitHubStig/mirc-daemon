@@ -42,7 +42,9 @@ export type ErrorCode =
   | "weak_match"
   | "too_long"
   /** A channel's topic names channels mIRC is not in; join them before downloading. */
-  | "join_required";
+  | "join_required"
+  /** No search trigger could be told from the channel's topic; pass one. */
+  | "unknown_trigger";
 
 /** A structured failure. `hint` is written for an LLM to read and relay. */
 export interface BridgeError {
@@ -241,7 +243,13 @@ export type ActionName =
   /** mIRC's open downloads ($get), polled while a transfer runs. */
   | "gets"
   /** Close every disconnected connection window (mIRC's /close -it). */
-  | "closewin";
+  | "closewin"
+  /** MODE <target> [modes]; without modes it asks for the current ones (324). */
+  | "mode"
+  /** Read a channel's topic from mIRC, or set it with `text`. */
+  | "topic"
+  /** A line in mIRC's @bridge window saying what the agent did. */
+  | "note";
 
 export interface CmdFrame {
   t: "cmd";

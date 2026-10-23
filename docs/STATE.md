@@ -5,7 +5,7 @@ decision see `docs/adr/`. This file is about what is true **right now**.
 
 ## Short version
 
-_Last updated 2026-10-23. Protocol **v3**, 24 MCP tools._
+_Last updated 2026-10-23. Protocol **v3**, 29 MCP tools._
 
 Everything an agent needs works against a real mIRC 7.85:
 
@@ -121,14 +121,15 @@ Proven by running it, with evidence in the log:
   by the SDK's own client. The frame shapes `bridge.mrc` emits are covered in
   `tests/bridge_contract_test.ts`. The tests cannot prove mIRC _runs_ a handler; see traps 15
   and 16.
-- **The 24 tools**:
+- **The 29 tools**:
   - status: `daemon_status`, `irc_list_sessions`, `irc_get_state`;
-  - reading and waiting: `irc_read`, `irc_wait_for`, `irc_members`, `irc_ison`;
+  - reading and waiting: `irc_read`, `irc_wait_for`, `irc_members`, `irc_ison`, `irc_whois`;
   - connections: `irc_connect`, `irc_ensure_connected`, `irc_disconnect`, `irc_nick`,
     `irc_close_windows`;
-  - channels: `irc_join`, `irc_ensure_joined`, `irc_part`;
+  - channels: `irc_join`, `irc_ensure_joined`, `irc_part`, `irc_topic`, `irc_mode`;
   - speaking: `irc_send`, `irc_notice`, `irc_notify`;
-  - DCC and XDCC: `irc_dcc_status`, `irc_dcc_watch`, `xdcc_list`, `xdcc_fetch`, `xdcc_cancel`;
+  - DCC and XDCC: `irc_dcc_status`, `irc_dcc_watch`, `xdcc_list`, `xdcc_search`,
+    `xdcc_search_results`, `xdcc_fetch`, `xdcc_cancel`;
   - gated: `irc_raw`, off unless the daemon runs with `--allow-raw`.
 - **The mSL script** sends and receives: the read loop drains, dispatch parses, replies go out.
 - **Protocol v2 in mIRC** (2026-10-22): the hello carries `"v":2` and is accepted. `/bridge.diag`
@@ -340,6 +341,41 @@ Proven by running it, with evidence in the log:
   one at a time, because each has a single pending slot in the script. Live: while an EFnet connect
   took 36.8 s, `irc_get_state` answered in 4 ms, `irc_members` in 36 ms, and an ISON round trip in
   218 ms. Before, each waited out the whole connect.
+
+- **`irc_mode`, `irc_whois`, `irc_topic`** (2026-10-23, the user's EFnet connection), so a mode
+  change no longer needs `--allow-raw`. All three are composed in the daemon from mirrored raw
+  replies; `bridge.mrc` only sends the commands.
+  - `irc_mode` sends the change, then at once asks for the channel's modes. The server answers in
+    order, so a refusal or the `324` comes first. Live on a throwaway channel: `+i` reported `+tin`
+    in 488 ms, and `-i` reported `+tn`. An unknown letter was refused with 472, and the user's
+    `#home!` was refused without `confirm`.
+  - `irc_whois` collects replies up to 318 and returns fields (user, host, real name, server,
+    channels, idle, account, away). It took 797 ms, and a missing nick gave `nick_not_found`.
+  - `irc_topic` reads from mIRC's own records (6 ms), and sets only on the agent's channels unless
+    confirmed.
+- **XDCC search** (2026-10-23, Rizon `#FILES-CHAT`, bot `[XB]-L0VE`). `xdcc_search` takes the
+  trigger from the channel's topic ("Triggers: !help !search …"), says `!search <words>` there, and
+  collects the replies. A result line is read by its `/msg <bot> XDCC SEND #n` part, which is
+  standard syntax, plus "Size:" and "Gets:". Lines that aren't results are kept verbatim for the
+  agent, and "445 results found" gives the total.
+  - **This bot queues searches**: answers came 117 s and 136 s after the agent's searches, and 72 s
+    in the last run. The first tries looked unanswered only because the wait gave up after 20 s. Now
+    `xdcc_search` waits 50 s, then returns a cursor and says not to search again (that only queues
+    another); `xdcc_search_results {cursor}` collects what came since, sending nothing. Live: 50 s
+    pending, then the results came in through `xdcc_search_results`.
+  - Leaving afterwards was refused, correctly: the user was already in `#files-chat`, so the
+    search's join answered "already joined" and the agent took no ownership.
+- **`@bridge` activity log** (2026-10-23). The user saw a channel window vanish with no idea why.
+  Every action that changes what the user sees, or what others see from them, now prints
+  `* agent: …` in `@bridge`:
+  - connects, "still connecting", disconnects and closed windows;
+  - joins (with the reason: a bot request, a search) and leaves, and refused joins;
+  - everything said under their nick: messages, notices, searches, `xdcc send`, raw lines;
+  - nick, mode and topic changes;
+  - each turn of a requested transfer: offered, received, failed, stalled, refused, cancelled.
+
+  Reads and progress polls are not logged. The notes are best effort: never awaited, never failing
+  what they describe.
 
 ## Not verified
 

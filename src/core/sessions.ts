@@ -9,7 +9,7 @@
 
 import { EventBus } from "./bus.ts";
 import { EventLog, type NewEvent } from "./buffers.ts";
-import { DccTracker } from "./dcc.ts";
+import { DccTracker, humanSize } from "./dcc.ts";
 import { OwnershipLedger } from "./ownership.ts";
 import { CommandDispatcher } from "./commands.ts";
 import { StateModel } from "./state.ts";
@@ -22,6 +22,7 @@ import {
   type ConnsPayload,
   type DccGet,
   type DccJob,
+  type DccState,
   type NetworkState,
   type NetworkStatus,
   type SessionInfo,
@@ -140,6 +141,54 @@ export class Session {
       liveness: options.ping
         ? { probe: () => this.ping(), explainSilence: (since) => this.explainSilence(since) }
         : undefined,
+    });
+    this.#noteDccChanges();
+  }
+
+  /**
+   * Tell the user, in mIRC's @bridge window, what the agent just did. Best
+   * effort by design: a note never delays or fails what it describes, so it is
+   * not awaited. Its outcome is still logged like any command's.
+   */
+  note(text: string): void {
+    if (this.#closed.signal.aborted) return;
+    void this.commands.send("note", { text: text.slice(0, 400) });
+  }
+
+  /**
+   * Note a requested transfer's turns as they happen, in the background: an
+   * offer, completion, failure, a stall, a refusal. Progress polls are not
+   * noted; they change nothing anyone needs to hear about.
+   */
+  #noteDccChanges(): void {
+    const seen = new Map<string, DccState>();
+    this.dcc.onChange((job) => {
+      if (!job.requestedBy || seen.get(job.id) === job.state) return;
+      seen.set(job.id, job.state);
+      const pack = `pack #${(job.requestedBy.pack ?? "?").replace(/^#/, "")}`;
+      const size = humanSize(job.size);
+      const what = job.file ? `${pack}, "${job.file}"${size ? ` (${size})` : ""}` : pack;
+      const from = job.requestedBy.bot;
+      switch (job.state) {
+        case "offered":
+          this.note(`${from} is sending ${what}`);
+          break;
+        case "complete":
+          this.note(`received ${what}${job.savedAs ? `, saved as ${job.savedAs}` : ""}`);
+          break;
+        case "failed":
+          this.note(`transfer from ${from} failed: ${what}`);
+          break;
+        case "stalled":
+          this.note(`transfer from ${from} has stalled (no data for a minute): ${what}`);
+          break;
+        case "refused":
+          this.note(`${from} refused ${pack}: ${job.detail ?? ""}`);
+          break;
+        case "cancelled":
+          this.note(`cancelled the transfer from ${from}: ${what}`);
+          break;
+      }
     });
   }
 

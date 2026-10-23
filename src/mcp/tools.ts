@@ -29,9 +29,26 @@ import {
   TRANSFER_DCC_STATES,
 } from "../core/types.ts";
 import { type Session, type SessionRegistry, silenceHint } from "../core/sessions.ts";
-import { emptyChannelWarning } from "../core/outcomes.ts";
-import { waitForEvent, type WaitMatcher } from "../core/waits.ts";
-import { channelsIn, classifyBotReply, plainText } from "../core/xdcc.ts";
+import { classifyNumeric, emptyChannelWarning } from "../core/outcomes.ts";
+import { isChannelBuffer, waitForEvent, type WaitMatcher } from "../core/waits.ts";
+import {
+  channelsIn,
+  classifyBotReply,
+  parseSearchResult,
+  plainText,
+  searchTotal,
+  searchTrigger,
+  triggersIn,
+} from "../core/xdcc.ts";
+import {
+  CHANNEL_CHANGE_REFUSALS,
+  isAbout,
+  modesFrom324,
+  numericOf,
+  parseWhois,
+  rawWords,
+  WHOIS_NUMERICS,
+} from "../core/numerics.ts";
 import { alreadyHad, describeDownload, describeProgress } from "../core/dcc.ts";
 import type { LogSink } from "../core/log.ts";
 
@@ -423,6 +440,31 @@ const partSchema = z.object({
   confirm: confirmArg,
 });
 const closeWindowsSchema = z.object({ session: sessionArg, confirm: confirmArg });
+const modeSchema = z.object({
+  session: sessionArg,
+  network: networkArg,
+  cid: cidArg,
+  channel: z.string(),
+  modes: z
+    .string()
+    .min(1)
+    .describe('Mode changes as IRC writes them, e.g. "+i", "-i+k secret", "+o nick".'),
+  confirm: confirmArg,
+});
+const whoisSchema = z.object({
+  session: sessionArg,
+  network: networkArg,
+  cid: cidArg,
+  nick: z.string(),
+});
+const topicSchema = z.object({
+  session: sessionArg,
+  network: networkArg,
+  cid: cidArg,
+  channel: z.string(),
+  text: z.string().min(1).optional().describe("Set the topic to this. Omit to read it."),
+  confirm: confirmArg,
+});
 const disconnectSchema = z.object({
   session: sessionArg,
   network: z
@@ -499,6 +541,40 @@ const xdccListSchema = z.object({
     .optional()
     .describe("The list is complete once the bot is silent this long (default 3000)."),
 });
+const xdccSearchSchema = z.object({
+  session: sessionArg,
+  network: networkArg,
+  cid: cidArg,
+  channel: z
+    .string()
+    .describe(
+      "Where to search: usually the chat channel that a bot channel's topic names, e.g. " +
+        "#FILES-CHAT for #FILES, whose own topic lists the triggers.",
+    ),
+  query: z.string().min(1),
+  trigger: z
+    .string()
+    .optional()
+    .describe('The search command, e.g. "!search" or "@find". Omit to take it from the topic.'),
+  timeoutMs: z.int().min(500).max(MAX_WAIT_MS).optional(),
+  quietMs: z
+    .int()
+    .min(100)
+    .max(30_000)
+    .optional()
+    .describe("The results are complete once nothing has come for this long (default 3000)."),
+});
+type XdccSearchArgs = z.infer<typeof xdccSearchSchema>;
+const xdccSearchResultsSchema = z.object({
+  session: sessionArg,
+  network: networkArg,
+  cid: cidArg,
+  channel: z.string().describe("The channel the search was said in."),
+  cursor: z.int().nonnegative().describe("The cursor xdcc_search returned."),
+  timeoutMs: z.int().min(500).max(MAX_WAIT_MS).optional(),
+  quietMs: z.int().min(100).max(30_000).optional(),
+});
+type XdccSearchResultsArgs = z.infer<typeof xdccSearchResultsSchema>;
 const xdccFetchSchema = z.object({
   session: sessionArg,
   network: networkArg,
@@ -541,6 +617,9 @@ type EnsureJoinedArgs = z.infer<typeof ensureJoinedSchema>;
 type PartArgs = z.infer<typeof partSchema>;
 type DisconnectArgs = z.infer<typeof disconnectSchema>;
 type CloseWindowsArgs = z.infer<typeof closeWindowsSchema>;
+type ModeArgs = z.infer<typeof modeSchema>;
+type WhoisArgs = z.infer<typeof whoisSchema>;
+type TopicArgs = z.infer<typeof topicSchema>;
 type NickArgs = z.infer<typeof nickSchema>;
 type SendArgs = z.infer<typeof sendSchema>;
 type NotifyArgs = z.infer<typeof notifySchema>;
@@ -828,6 +907,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         ? ` To give up, irc_disconnect {cid: ${trying.cid}}; that window is the agent's.`
         : ` To give up, irc_disconnect {cid: ${trying.cid}, confirm: true}, but that window is ` +
           "the user's, so only if they agree.";
+      s.note(`still connecting to ${server}; mIRC keeps trying on its own`);
       return failure(
         bridgeError(
           "connect_timeout",
@@ -856,6 +936,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     if (refreshError) return failure(refreshError);
     const cid = typeof outcome.data?.cid === "number" ? outcome.data.cid : undefined;
     const net = cid === undefined ? undefined : s.state.byCid(cid);
+    s.note(`connected to ${server}${net ? ` (${net.name}, cid ${net.cid})` : ""}`);
     return json({
       skipped: false,
       reusedWindow: reusable === undefined ? false : usersWindow ? "user's" : "agent's",
@@ -940,9 +1021,15 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         const outcome = await s.commands.send("join", { cid: net.cid, channel, key }, {
           context: "join",
         });
-        if (!outcome.ok) return failure(explainJoinRefusal(outcome.error, net));
+        if (!outcome.ok) {
+          s.note(`could not join ${channel} on ${net.name}: ${outcome.error.hint}`);
+          return failure(explainJoinRefusal(outcome.error, net));
+        }
         // Only a real join earns a receipt: "already" means it was in there before.
-        if (outcome.data?.already !== true) s.owned.joinedChannel(net.cid, channel);
+        if (outcome.data?.already !== true) {
+          s.owned.joinedChannel(net.cid, channel);
+          s.note(`joined ${channel} on ${net.name}`);
+        }
 
         const members = typeof outcome.data?.members === "number"
           ? outcome.data.members
@@ -970,7 +1057,10 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         const outcome = await s.commands.send("join", { cid: net.cid, channel }, {
           context: "join",
         });
-        if (!outcome.ok) return failure(explainJoinRefusal(outcome.error, net));
+        if (!outcome.ok) {
+          s.note(`could not join ${channel} on ${net.name}: ${outcome.error.hint}`);
+          return failure(explainJoinRefusal(outcome.error, net));
+        }
         if (outcome.data?.already === true) {
           return json({
             skipped: true,
@@ -981,6 +1071,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           });
         }
         s.owned.joinedChannel(net.cid, channel);
+        s.note(`joined ${channel} on ${net.name}`);
         const members = typeof outcome.data?.members === "number"
           ? outcome.data.members
           : s.state.memberCount(net, channel);
@@ -991,6 +1082,168 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           data: outcome.data ?? {},
           warnings: warning ? [warning] : [],
         });
+      }),
+  );
+
+  /** Wait for a raw reply on one connection, since a cursor. */
+  function waitRaw(
+    s: Session,
+    cid: number,
+    test: (event: BridgeEvent) => boolean,
+    since: number,
+    timeoutMs: number,
+  ): Promise<BridgeEvent | undefined> {
+    return waitForEvent({
+      log: s.log,
+      bus: s.bus,
+      signal: s.closed,
+      matcher: { kind: "raw", cid, test },
+      since,
+      timeoutMs,
+    });
+  }
+
+  /** A refusal of a MODE or TOPIC change on `channel`. */
+  function refusalOf(event: BridgeEvent, channel: string): boolean {
+    const n = numericOf(event);
+    if (n === undefined || !CHANNEL_CHANGE_REFUSALS.has(n)) return false;
+    // 472 and 501 name the mode letter, not the channel.
+    return n === 472 || n === 501 || isAbout(event, channel);
+  }
+
+  function refused(event: BridgeEvent): ToolResult {
+    return failure(
+      classifyNumeric(numericOf(event) ?? 0, "generic", rawWords(event).slice(3).join(" ")),
+    );
+  }
+
+  tool(
+    "irc_mode",
+    {
+      description:
+        'Change a channel\'s modes, e.g. "+i" (invite only), "-i+k secret", "+o nick". Needs ' +
+        "channel operator status. Channels the agent joined itself need no confirmation; the " +
+        "user's need confirm: true. Reports the modes the server then shows, or its refusal.",
+      inputSchema: modeSchema.shape,
+    },
+    ({ session, network, cid, channel, modes, confirm }: ModeArgs) =>
+      guarded(async () => {
+        const s = sessionOf(registry, session);
+        const net = await targetOf(s, network, stateFreshnessMs, cid);
+        if (!s.owned.ownsChannel(net.cid, channel) && confirm !== true) {
+          return usersOwn(channel, net);
+        }
+        const since = s.log.cursor;
+        const changed = await s.commands.send("mode", { cid: net.cid, target: channel, modes });
+        if (!changed.ok) return failure(changed.error);
+        // IRC acknowledges a mode change only by echoing it, and a refusal
+        // only by a numeric. So ask for the modes straight after: the server
+        // answers in order, and whichever of refusal or 324 comes first is the
+        // outcome. No fixed wait.
+        const asked = await s.commands.send("mode", { cid: net.cid, target: channel });
+        if (!asked.ok) return failure(asked.error);
+        const reply = await waitRaw(
+          s,
+          net.cid,
+          (e) => refusalOf(e, channel) || (numericOf(e) === 324 && isAbout(e, channel)),
+          since,
+          8000,
+        );
+        if (!reply && s.closed.aborted) return linkDropped();
+        if (!reply) {
+          return failure(
+            bridgeError("timeout", `the server did not report ${channel}'s modes within 8 s.`),
+          );
+        }
+        if (numericOf(reply) !== 324) return refused(reply);
+        s.note(`set ${modes} on ${channel} (now ${modesFrom324(reply)})`);
+        return json({ ok: true, channel, modes: modesFrom324(reply) });
+      }),
+  );
+
+  tool(
+    "irc_whois",
+    {
+      description:
+        "Who a nick is: user and host, real name, server, channels, idle time, the services " +
+        "account it is logged in as, and away message, as the server reports them.",
+      inputSchema: whoisSchema.shape,
+    },
+    ({ session, network, cid, nick }: WhoisArgs) =>
+      guarded(async () => {
+        const s = sessionOf(registry, session);
+        const net = await targetOf(s, network, stateFreshnessMs, cid);
+        const since = s.log.cursor;
+        const sent = await s.commands.send("whois", { cid: net.cid, nick });
+        if (!sent.ok) return failure(sent.error);
+        // 318 ends a WHOIS; 401 means there was no such nick.
+        const end = await waitRaw(
+          s,
+          net.cid,
+          (e) => (numericOf(e) === 318 || numericOf(e) === 401) && isAbout(e, nick),
+          since,
+          10_000,
+        );
+        if (!end && s.closed.aborted) return linkDropped();
+        if (!end) {
+          return failure(bridgeError("timeout", `the server did not finish a WHOIS of ${nick}.`));
+        }
+        if (numericOf(end) === 401) return failure(classifyNumeric(401));
+        const replies = s.log
+          .since(since, { kinds: ["raw"], limit: 200, keep: "oldest" })
+          .filter((e) =>
+            e.cid === net.cid && WHOIS_NUMERICS.has(numericOf(e) ?? 0) && isAbout(e, nick)
+          );
+        return json(parseWhois(nick, replies));
+      }),
+  );
+
+  tool(
+    "irc_topic",
+    {
+      description:
+        "Read a channel's topic (mIRC must be in the channel), or set it with `text`. Setting " +
+        "it on a channel the agent joined itself needs no confirmation; the user's need " +
+        "confirm: true. Channels state their rules in the topic, so read it when joining.",
+      inputSchema: topicSchema.shape,
+    },
+    ({ session, network, cid, channel, text, confirm }: TopicArgs) =>
+      guarded(async () => {
+        const s = sessionOf(registry, session);
+        const net = await targetOf(s, network, stateFreshnessMs, cid);
+        if (text === undefined) {
+          const read = await s.commands.send("topic", { cid: net.cid, channel });
+          if (!read.ok) return failure(read.error);
+          return json({ channel, topic: read.data?.topic ?? "" });
+        }
+        if (!s.owned.ownsChannel(net.cid, channel) && confirm !== true) {
+          return usersOwn(channel, net);
+        }
+        const since = s.log.cursor;
+        const sent = await s.commands.send("topic", { cid: net.cid, channel, text });
+        if (!sent.ok) return failure(sent.error);
+        // Accepted, the server echoes the TOPIC to everyone in the channel, us
+        // included; refused, it sends a numeric.
+        const reply = await waitForEvent({
+          log: s.log,
+          bus: s.bus,
+          signal: s.closed,
+          matcher: {
+            cid: net.cid,
+            test: (e) =>
+              (e.kind === "topic" && (e.buf ?? "").toLowerCase() === channel.toLowerCase()) ||
+              (e.kind === "raw" && refusalOf(e, channel)),
+          },
+          since,
+          timeoutMs: 8000,
+        });
+        if (!reply && s.closed.aborted) return linkDropped();
+        if (!reply) {
+          return failure(bridgeError("timeout", `the server did not confirm ${channel}'s topic.`));
+        }
+        if (reply.kind === "raw") return refused(reply);
+        s.note(`set ${channel}'s topic: ${reply.text ?? text}`);
+        return json({ ok: true, channel, topic: reply.text ?? text });
       }),
   );
 
@@ -1011,7 +1264,9 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         if (!s.owned.ownsChannel(net.cid, channel) && confirm !== true) {
           return usersOwn(channel, net);
         }
-        return fromOutcome(await s.commands.send("part", { cid: net.cid, channel, message }));
+        const outcome = await s.commands.send("part", { cid: net.cid, channel, message });
+        if (outcome.ok) s.note(`left ${channel} on ${net.name}`);
+        return fromOutcome(outcome);
       }),
   );
 
@@ -1053,9 +1308,14 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         const after = await s.refreshState();
         if (after) return failure(after);
         const left = new Set(s.state.networks().map((n) => n.cid));
-        return json({
-          closed: idle.filter((n) => !left.has(n.cid)).map((n) => ({ cid: n.cid, name: n.name })),
-        });
+        const closed = idle.filter((n) => !left.has(n.cid));
+        if (closed.length > 0) {
+          s.note(
+            `closed ${closed.length} disconnected window${closed.length === 1 ? "" : "s"}: ` +
+              closed.map((n) => `${n.name} (cid ${n.cid})`).join(", "),
+          );
+        }
+        return json({ closed: closed.map((n) => ({ cid: n.cid, name: n.name })) });
       }),
   );
 
@@ -1089,6 +1349,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           timeoutMs: 15_000,
         });
         if (!outcome.ok) return failure(outcome.error);
+        s.note(`disconnected from ${net.name} (cid ${net.cid})`);
         const error = await s.refreshState();
         if (error) return failure(error);
         return json({ ok: true, network: s.state.byCid(net.cid) ?? null });
@@ -1118,6 +1379,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         const outcome = await s.commands.send("nick", { cid: net.cid, nick });
         if (!outcome.ok) return failure(outcome.error);
         const confirmed = typeof outcome.data?.nick === "string" ? outcome.data.nick : nick;
+        s.note(`changed nick to ${confirmed} on ${net.name}`);
         return json({ ok: true, network: net.name, nick: confirmed });
       }),
   );
@@ -1137,9 +1399,11 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
       guarded(async () => {
         const s = sessionOf(registry, session);
         const net = await targetOf(s, network, stateFreshnessMs, cid);
-        return fromOutcome(
-          await s.commands.send("msg", { cid: net.cid, target, text }, { context: "message" }),
-        );
+        const outcome = await s.commands.send("msg", { cid: net.cid, target, text }, {
+          context: "message",
+        });
+        if (outcome.ok) s.note(`said to ${target} on ${net.name}: ${text}`);
+        return fromOutcome(outcome);
       }),
   );
 
@@ -1153,9 +1417,11 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
       guarded(async () => {
         const s = sessionOf(registry, session);
         const net = await targetOf(s, network, stateFreshnessMs, cid);
-        return fromOutcome(
-          await s.commands.send("notice", { cid: net.cid, target, text }, { context: "message" }),
-        );
+        const outcome = await s.commands.send("notice", { cid: net.cid, target, text }, {
+          context: "message",
+        });
+        if (outcome.ok) s.note(`sent a notice to ${target} on ${net.name}: ${text}`);
+        return fromOutcome(outcome);
       }),
   );
 
@@ -1433,6 +1699,201 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
       }),
   );
 
+  /**
+   * Collect a search's replies, from `cursor` on: wait up to `waitMs` for the
+   * first, then until nothing has come for `quietMs`. Replies that arrived
+   * before the call are in the log already and are picked up first, which is
+   * how xdcc_search_results finds results that came in between calls.
+   */
+  async function collectSearch(
+    s: Session,
+    cid: number,
+    channel: string,
+    cursor: number,
+    waitMs: number,
+    quietMs: number,
+  ): Promise<{ replies: BridgeEvent[]; complete: boolean } | undefined> {
+    // Search bots answer by private notice (seen live); a few answer in the
+    // channel, so a channel line counts only when it is a result.
+    const matcher: WaitMatcher = {
+      cid,
+      test: (e) =>
+        (e.kind === "notice" || e.kind === "text") &&
+        (!isChannelBuffer(e.buf) ||
+          ((e.buf ?? "").toLowerCase() === channel.toLowerCase() &&
+            parseSearchResult(e.text ?? "") !== undefined)),
+    };
+    const deadline = Date.now() + waitMs;
+    const replies: BridgeEvent[] = [];
+    let since = cursor;
+    let complete = true;
+    while (replies.length < 300) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        if (replies.length > 0) complete = false;
+        break;
+      }
+      const next = await waitForEvent({
+        log: s.log,
+        bus: s.bus,
+        signal: s.closed,
+        matcher,
+        since,
+        timeoutMs: replies.length === 0 ? remaining : Math.min(quietMs, remaining),
+      });
+      if (!next && s.closed.aborted) return undefined;
+      if (!next) break;
+      replies.push(next);
+      since = next.seq;
+    }
+    return { replies, complete };
+  }
+
+  /** What a search turned up, for the agent: results, the total, and every other line. */
+  function searchReport(
+    channel: string,
+    cursor: number,
+    collected: { replies: BridgeEvent[]; complete: boolean },
+    about: Record<string, unknown> = {},
+  ): ToolResult {
+    const { replies, complete } = collected;
+    if (replies.length === 0) {
+      return json({
+        ...about,
+        channel,
+        pending: true,
+        cursor,
+        results: [],
+        next: "No answer yet. Search bots queue searches: one took about two minutes live. Do " +
+          "NOT search again, which only queues another; call xdcc_search_results " +
+          "{cursor: " + cursor + ", channel: " + JSON.stringify(channel) + "} in a minute or so. " +
+          "Replies that arrive meanwhile are kept.",
+      });
+    }
+    const results = replies
+      .map((e) => parseSearchResult(e.text ?? ""))
+      .filter((r) => r !== undefined);
+    const total = replies.map((e) => searchTotal(e.text ?? "")).find((t) => t !== undefined);
+    // Everything that is not a result, word for word: the "Search for ..."
+    // header, "no results", hints like "!request", in whatever language.
+    const said = replies
+      .filter((e) => parseSearchResult(e.text ?? "") === undefined)
+      .map((e) => (e.nick + ": " + plainText(e.text ?? "")))
+      .slice(0, 20);
+    return json({
+      ...about,
+      channel,
+      results,
+      shown: results.length,
+      ...(total !== undefined ? { total } : {}),
+      said,
+      complete,
+      // From here on: replies from a later search, or the rest of this one.
+      cursor: replies[replies.length - 1].seq,
+      next: results.length > 0
+        ? "Pick the result that matches what the user wants (check the name and size), tell " +
+          "the user which it is, then xdcc_fetch {bot, pack} in the channel where that bot is, " +
+          "usually the bot channel whose topic named this one. xdcc_fetch says if the bot is " +
+          "not there." +
+          (total !== undefined && total > results.length
+            ? " Only " + results.length + " of " + total + " are shown: add words to narrow it."
+            : "")
+        : "No result lines were recognised. Read `said`: it may say there are no results (and " +
+          "how to request the file), or use a format the daemon does not know.",
+    });
+  }
+
+  tool(
+    "xdcc_search",
+    {
+      description:
+        "Search for a file with a channel's search trigger (e.g. !search), as a person would " +
+        "when a pack number from a website turns out to be the wrong file. It says the search " +
+        "in the channel, visibly and under the user's nick, so use it only when the user wants " +
+        "something found. Joins the channel if needed and takes the trigger from its topic " +
+        "unless given. Search bots can take minutes to answer; if nothing has come back in " +
+        "time, it returns a cursor for xdcc_search_results instead. Results are bot, pack, " +
+        "name and size; pick the one that matches and xdcc_fetch it in the bot's channel.",
+      inputSchema: xdccSearchSchema.shape,
+    },
+    ({ session, network, cid, channel, query, trigger, timeoutMs, quietMs }: XdccSearchArgs) =>
+      guarded(async () => {
+        const s = sessionOf(registry, session);
+        const net = await targetOf(s, network, stateFreshnessMs, cid);
+        // Joined or not, the reply carries the topic, which lists the triggers.
+        const joined = await s.commands.send("join", { cid: net.cid, channel }, {
+          context: "join",
+        });
+        if (!joined.ok) return failure(explainJoinRefusal(joined.error, net));
+        if (joined.data?.already !== true) {
+          s.owned.joinedChannel(net.cid, channel);
+          s.note("joined " + channel + " on " + net.name + " to search it");
+        }
+        const topic = typeof joined.data?.topic === "string" ? joined.data.topic : "";
+
+        const triggers = triggersIn(topic);
+        const command = trigger ?? searchTrigger(triggers);
+        if (!command) {
+          return failure(
+            bridgeError(
+              "unknown_trigger",
+              "could not tell " + channel + "'s search command from its topic" +
+                (triggers.length > 0 ? " (it lists " + triggers.join(", ") + ")" : "") +
+                '. Topic: "' + plainText(topic) + '". Pass trigger, e.g. "!search" or "@find", ' +
+                "or ask the user which one the channel uses.",
+            ),
+          );
+        }
+
+        const cursor = s.log.cursor;
+        const said = command + " " + query;
+        const sent = await s.commands.send(
+          "msg",
+          { cid: net.cid, target: channel, text: said },
+          { context: "message" },
+        );
+        if (!sent.ok) return failure(sent.error);
+        s.note("searched in " + channel + ": " + said);
+
+        const collected = await collectSearch(
+          s,
+          net.cid,
+          channel,
+          cursor,
+          timeoutMs ?? 50_000,
+          quietMs ?? 3000,
+        );
+        if (!collected) return linkDropped();
+        return searchReport(channel, cursor, collected, { query, trigger: command });
+      }),
+  );
+
+  tool(
+    "xdcc_search_results",
+    {
+      description:
+        "Collect the results of an earlier xdcc_search, from the cursor it returned. Sends " +
+        "nothing: use this rather than searching again when a search bot is slow. Waits up to " +
+        "~50 s for replies that have not come yet.",
+      inputSchema: xdccSearchResultsSchema.shape,
+    },
+    ({ session, network, cid, channel, cursor, timeoutMs, quietMs }: XdccSearchResultsArgs) =>
+      guarded(async () => {
+        const s = sessionOf(registry, session);
+        const net = await targetOf(s, network, stateFreshnessMs, cid);
+        const collected = await collectSearch(
+          s,
+          net.cid,
+          channel,
+          cursor,
+          timeoutMs ?? 50_000,
+          quietMs ?? 3000,
+        );
+        if (!collected) return linkDropped();
+        return searchReport(channel, cursor, collected);
+      }),
+  );
+
   tool(
     "xdcc_fetch",
     {
@@ -1507,6 +1968,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         if (!joined.ok) return await fail(explainJoinRefusal(joined.error, net));
         if (joined.data?.already !== true) {
           s.owned.joinedChannel(net.cid, channel);
+          s.note(`joined ${channel} on ${net.name} to ask ${bot} for a pack`);
           steps.push("joined");
         } else {
           steps.push("already joined");
@@ -1563,6 +2025,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           { context: "message" },
         );
         if (!sent.ok) return await fail(sent.error);
+        s.note(`asked ${bot} on ${net.name} for pack #${pack.replace(/^#/, "")}`);
         steps.push("requested");
 
         // 5. wait, briefly, for the bot to answer or the offer to arrive.
@@ -1684,7 +2147,9 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           );
         }
         const net = await targetOf(s, network, stateFreshnessMs, cid);
-        return fromOutcome(await s.commands.send("raw", { cid: net.cid, line }));
+        const outcome = await s.commands.send("raw", { cid: net.cid, line });
+        if (outcome.ok) s.note(`sent a raw line on ${net.name}: ${line}`);
+        return fromOutcome(outcome);
       }),
   );
 }
