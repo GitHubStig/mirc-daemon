@@ -1998,6 +1998,59 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     return { replies, complete };
   }
 
+  // A bot tool joins the channel it is told to, and the join can land in the
+  // wrong place. Seen with a small local model: asked to search a channel "on
+  // Rizon", it named no network, the daemon used the only one connected, and the
+  // join created an empty channel of that name there, where the search was then
+  // said under the user's nick. A wrong channel is not always empty, though (the
+  // user has joined ones with a few people in), so the real test is whether what
+  // the tool came for is there: the bot, or a search trigger in the topic. When
+  // it is not, a channel this call joined is left again, and the answer says
+  // where it looked.
+
+  /** Leave `channel` if this call's join put mIRC there; says so in @bridge. */
+  async function leaveIfNew(
+    s: Session,
+    net: NetworkState,
+    channel: string,
+    joined: Record<string, unknown> | undefined,
+    why: string,
+  ): Promise<boolean> {
+    if (joined?.already === true) return false;
+    const left = await s.commands.send("part", { cid: net.cid, channel });
+    if (left.ok) s.note(`left ${channel} on ${net.name} again: ${why}`);
+    return left.ok;
+  }
+
+  /** Where the tool looked, and the way out when that was the wrong network. */
+  function lookedOn(s: Session, net: NetworkState, channel: string, left: boolean): string {
+    const all = s.state.networks().filter((n) => n.status === "connected").map((n) => n.name);
+    return ` This was ${channel} on ${net.name}` + (left ? ", which was left again" : "") +
+      `. mIRC is on ${all.join(", ")}. If the user named another network, irc_connect ` +
+      "{network} to it first, then call again with that network; otherwise check the channel " +
+      "name.";
+  }
+
+  /** Refuse a channel mIRC is alone in: nobody there can answer a bot command. */
+  async function refuseEmpty(
+    s: Session,
+    net: NetworkState,
+    channel: string,
+    joined: Record<string, unknown> | undefined,
+  ): Promise<BridgeError | undefined> {
+    const members = typeof joined?.members === "number"
+      ? joined.members
+      : s.state.memberCount(net, channel);
+    if (members === undefined || members > 1) return undefined;
+    const left = await leaveIfNew(s, net, channel, joined, "nobody else was in it");
+    return bridgeError(
+      "empty_channel",
+      `nobody else is in ${channel}` +
+        (left ? ": it did not exist until the join created it" : "") + ", and nothing was sent." +
+        lookedOn(s, net, channel, left),
+    );
+  }
+
   /** What a search turned up, for the agent: results, the total, and every other line. */
   function searchReport(
     channel: string,
@@ -2085,18 +2138,33 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           s.owned.joinedChannel(net.cid, channel);
           s.note("joined " + channel + " on " + net.name + " to search it");
         }
+        const empty = await refuseEmpty(s, net, channel, joined.data);
+        if (empty) return failure(empty);
         const topic = typeof joined.data?.topic === "string" ? joined.data.topic : "";
 
         const triggers = triggersIn(topic);
         const command = trigger ?? searchTrigger(triggers);
         if (!command) {
+          // A topic that lists triggers is the right channel with an unfamiliar
+          // one; a topic with none may well be the wrong channel or network.
+          if (triggers.length > 0) {
+            return failure(
+              bridgeError(
+                "unknown_trigger",
+                "could not tell " + channel + "'s search command from its topic (it lists " +
+                  triggers.join(", ") + '). Topic: "' + plainText(topic) + '". Pass trigger, ' +
+                  'e.g. "!search" or "@find", or ask the user which one the channel uses.',
+              ),
+            );
+          }
+          const left = await leaveIfNew(s, net, channel, joined.data, "its topic names no search");
           return failure(
             bridgeError(
               "unknown_trigger",
-              "could not tell " + channel + "'s search command from its topic" +
-                (triggers.length > 0 ? " (it lists " + triggers.join(", ") + ")" : "") +
-                '. Topic: "' + plainText(topic) + '". Pass trigger, e.g. "!search" or "@find", ' +
-                "or ask the user which one the channel uses.",
+              channel + "'s topic names no search command, and nothing was sent. Topic: \"" +
+                plainText(topic) + '".' + lookedOn(s, net, channel, left) + " Only if this " +
+                'is the right channel, pass trigger (e.g. "!search"), or ask the user which one ' +
+                "it uses.",
             ),
           );
         }
@@ -2230,6 +2298,8 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         } else {
           steps.push("already joined");
         }
+        const empty = await refuseEmpty(s, net, channel, joined.data);
+        if (empty) return await fail(empty);
 
         // The topic's conditions come before the request. Many XDCC channels ban
         // anyone who downloads without also joining the channels their topic
@@ -2262,10 +2332,12 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         const members = await s.commands.send("members", { cid: net.cid, channel, nick: bot });
         if (members.ok && typeof members.data?.present === "boolean") {
           if (!members.data.present) {
+            const left = await leaveIfNew(s, net, channel, joined.data, `${bot} is not in it`);
             return await fail(
               bridgeError(
                 "bot_not_in_channel",
-                `${bot} is not in ${channel}. Check the bot name, or it may be offline.`,
+                `${bot} is not in ${channel}, and nothing was sent to it. Check the bot name, ` +
+                  "or it may be offline." + lookedOn(s, net, channel, left),
               ),
             );
           }

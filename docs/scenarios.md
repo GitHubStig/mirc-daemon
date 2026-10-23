@@ -217,3 +217,17 @@ Scenarios 1 to 5 in one `pi` session (Gemma 4 12B, Q4, on Ollama, thinking off),
   window after disconnecting it, so neither the clean-up nor a single "disconnect" needs a second
   step. It only does so when every disconnected window is the agent's and none holds a running
   transfer, since mIRC closes them all at once.
+
+### `pi` round 3, 2026-10-23: scenario 4 alone, a fresh session
+
+- **Search**: stopped by the user. The new `pending` wording worked: it called `xdcc_search_results`
+  straight away. But it never connected to the network it was asked about. It named no network, the
+  daemon used the only one connected (EFnet), and the join created an empty channel of that name
+  there. `unknown_trigger` ("topic is empty, pass a trigger") then steered it to pass `!search`,
+  which was said into that empty channel under the user's nick. Fixed:
+  - `xdcc_search` and `xdcc_fetch` refuse a channel mIRC is alone in (`empty_channel`).
+  - A wrong channel is not always empty, so the real check is whether what the tool came for is
+    there: a search trigger in the topic, or the bot. When it is not, a channel the call itself
+    joined is left again, and the answer names the network it looked on, the networks mIRC is on,
+    and says to `irc_connect {network}` first if the user named another.
+  - `irc_connect {network: "Rizon"}` now works with no server, from mIRC's own server list.

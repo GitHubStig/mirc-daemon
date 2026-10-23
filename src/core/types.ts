@@ -44,7 +44,9 @@ export type ErrorCode =
   /** A channel's topic names channels mIRC is not in; join them before downloading. */
   | "join_required"
   /** No search trigger could be told from the channel's topic; pass one. */
-  | "unknown_trigger";
+  | "unknown_trigger"
+  /** Nobody else is in the channel: it did not exist, or it is on another network. */
+  | "empty_channel";
 
 /** A structured failure. `hint` is written for an LLM to read and relay. */
 export interface BridgeError {

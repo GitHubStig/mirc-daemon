@@ -1891,6 +1891,98 @@ Deno.test("irc_send sends a NOTICE with notice: true, a PRIVMSG without", async 
   }
 });
 
+// --- the wrong channel or network ---------------------------------------------------
+
+/** A join that lands in a channel of `members`, with `topic`; `already` if mIRC was in it. */
+function landIn(s: Stack, members: number, topic: string, already = false, botHere = true) {
+  s.fake.setHandler((cmd) => {
+    if (cmd.action === "join") {
+      const ch = String(cmd.params?.channel);
+      return { ok: true, data: { joined: ch, members, topic, ...(already ? { already } : {}) } };
+    }
+    if (cmd.action === "members") return { ok: true, data: { count: members, present: botHere } };
+    return undefined;
+  });
+}
+
+const sent = (s: Stack, action: string) => s.fake.received.filter((c) => c.action === action);
+
+Deno.test("xdcc_search leaves a channel the join created, and says nothing in it", async () => {
+  // Live: a search "on Rizon" with only EFnet up created an empty channel on EFnet.
+  const s = await stack();
+  try {
+    landIn(s, 1, "");
+    const text = textOf(
+      await s.client.callTool({
+        name: "xdcc_search",
+        arguments: { channel: "#FILES-CHAT", query: "debian", trigger: "!search" },
+      }),
+    );
+    assertEquals(text.startsWith("empty_channel:"), true);
+    assertEquals(text.includes("mIRC is on net1"), true);
+    assertEquals(sent(s, "part").map((c) => c.params?.channel), ["#FILES-CHAT"]);
+    assertEquals(sent(s, "msg").length, 0);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("xdcc_search: a few people and no trigger in the topic is likely the wrong place", async () => {
+  const s = await stack();
+  try {
+    landIn(s, 4, "welcome");
+    const text = textOf(
+      await s.client.callTool({ name: "xdcc_search", arguments: { channel: "#x", query: "q" } }),
+    );
+    assertEquals(text.startsWith("unknown_trigger:"), true);
+    assertEquals(text.includes("which was left again"), true);
+    assertEquals(sent(s, "part").length, 1);
+    assertEquals(sent(s, "msg").length, 0);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("xdcc_search: triggers in the topic but no search keeps the channel", async () => {
+  const s = await stack();
+  try {
+    landIn(s, 300, "Triggers: !help !latest");
+    const text = textOf(
+      await s.client.callTool({ name: "xdcc_search", arguments: { channel: "#x", query: "q" } }),
+    );
+    assertEquals(text.startsWith("unknown_trigger:"), true);
+    assertEquals(sent(s, "part").length, 0);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("xdcc_fetch leaves a channel it joined when the bot is not there", async () => {
+  const s = await stack();
+  try {
+    landIn(s, 6, "", false, false);
+    const text = textOf(await s.client.callTool({ name: "xdcc_fetch", arguments: fetchArgs }));
+    assertEquals(text.startsWith("bot_not_in_channel:"), true);
+    assertEquals(text.includes("If the user named another network"), true);
+    assertEquals(sent(s, "part").length, 1);
+    assertEquals(sent(s, "msg").length, 0);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("xdcc_fetch never leaves a channel mIRC was already in", async () => {
+  const s = await stack();
+  try {
+    landIn(s, 6, "", true, false);
+    const text = textOf(await s.client.callTool({ name: "xdcc_fetch", arguments: fetchArgs }));
+    assertEquals(text.startsWith("bot_not_in_channel:"), true);
+    assertEquals(sent(s, "part").length, 0);
+  } finally {
+    await s.stop();
+  }
+});
+
 // --- searching -----------------------------------------------------------------------
 
 Deno.test("xdcc_search takes the trigger from the topic and returns the results", async () => {
