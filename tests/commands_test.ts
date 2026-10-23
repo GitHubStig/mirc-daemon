@@ -55,7 +55,7 @@ Deno.test("silence becomes a timeout, never a hang", async () => {
 
 Deno.test("one credit at a time: the second command waits for the first answer", async () => {
   const { written, dispatcher, reply } = harness({ maxInFlight: 1 });
-  const first = dispatcher.send("join");
+  const first = dispatcher.send("msg");
   const second = dispatcher.send("say");
 
   await tick();
@@ -71,6 +71,39 @@ Deno.test("one credit at a time: the second command waits for the first answer",
   reply(written[1].id);
   await second;
   assertEquals(dispatcher.outstanding, 0);
+});
+
+Deno.test("a pending connect holds up no quick command, and no join", async () => {
+  // Live, an EFnet connect took 50 s, and every tool call waited behind it.
+  const { written, dispatcher, reply } = harness({ maxInFlight: 1 });
+  const connect = dispatcher.send("connect", { server: "irc.efnet.org" });
+  const state = dispatcher.send("conns");
+  const join = dispatcher.send("join", { channel: "#elsewhere" });
+  await tick();
+  assertEquals(written.map((f) => f.action), ["connect", "conns", "join"]);
+
+  reply(written[1].id);
+  reply(written[2].id);
+  assertEquals((await state).ok, true);
+  assertEquals((await join).ok, true);
+  reply(written[0].id);
+  assertEquals((await connect).ok, true);
+});
+
+Deno.test("two of one deferred kind never overlap: bridge.mrc has one slot for each", async () => {
+  const { written, dispatcher, reply } = harness({ maxInFlight: 3 });
+  const first = dispatcher.send("join", { channel: "#a" });
+  const second = dispatcher.send("join", { channel: "#b" });
+  await tick();
+  assertEquals(written.length, 1);
+  assertEquals(dispatcher.queueDepth, 1);
+
+  reply(written[0].id);
+  await first;
+  await tick();
+  assertEquals(written.map((f) => f.params?.channel), ["#a", "#b"]);
+  reply(written[1].id);
+  await second;
 });
 
 Deno.test("with more credits, commands are in flight together", async () => {
@@ -148,7 +181,7 @@ Deno.test("after the connection drops, new commands fail immediately", async () 
 
 Deno.test("a command queued behind a drop fails rather than hanging", async () => {
   const { written, dispatcher } = harness({ maxInFlight: 1 });
-  const first = dispatcher.send("join");
+  const first = dispatcher.send("msg");
   const queued = dispatcher.send("say");
   await tick();
   assertEquals(written.length, 1);

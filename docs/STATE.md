@@ -334,6 +334,13 @@ Proven by running it, with evidence in the log:
     spelled `#files-chat`), the same call passed the topic check and stopped at
     `bot_not_in_channel`. A made-up bot name was used, so nothing was requested.
 
+- **A slow connect no longer holds everything up** (2026-10-23). Commands run in lanes (see
+  `src/core/commands.ts`). The ones `bridge.mrc` answers on the spot share one. Those answered only
+  on the server's reply (connect, join, part, nick, disconnect, ison) each get a lane of their own,
+  one at a time, because each has a single pending slot in the script. Live: while an EFnet connect
+  took 36.8 s, `irc_get_state` answered in 4 ms, `irc_members` in 36 ms, and an ISON round trip in
+  218 ms. Before, each waited out the whole connect.
+
 ## Not verified
 
 Assumed or untested. Treat these as the actual risk surface.
@@ -364,9 +371,7 @@ Beyond those:
 
 - **`raw` gating**: decided (2026-10-23) to keep it. It is the escape hatch for what the tools do
   not cover (WHOIS, MODE), and off by default is right.
-- **The heartbeat's "silent" path** is unit-tested only: no real hang has been seen. One mSL command
-  at a time also means a pending connect (up to 50 s) holds up every other tool call, the progress
-  poll included. That is known, and not yet worth reworking.
+- **The heartbeat's "silent" path** is unit-tested only: no real hang has been seen.
 - **Known gaps, deliberately not built for.** A daemon restart mid-transfer loses the in-memory job.
   mIRC's later "file received" then shows up as a job nobody requested: visible, but no longer tied
   to its request. And events while the bridge link is down are dropped, because mSL does not queue
@@ -504,11 +509,13 @@ minimised **`@bridge`** window, not the active channel. Available while debuggin
 
 ## Next, in order
 
-1. **Close the remaining live gaps** under "Not verified" when the chance arises: a bot's queue; a
-   real stall.
-2. **Maybe**: let other commands through while a connect waits (it holds mIRC's one command slot for
-   up to 50 s). That needs care: the connect, join, part and nick replies each use one pending
-   variable in `bridge.mrc`, and the single slot is what keeps them from colliding.
+1. **Close the remaining live gaps when they happen**: a bot's queue, and a real stall. Neither can
+   be found on demand. When the user reports one, read the log for that window: every bot reply, DCC
+   event and 15 s progress poll is in it. A stall can also be staged: the user's mIRC sends itself
+   `/ctcp <own nick> DCC SEND …` pointing at a small local script that sends some bytes and then
+   stops.
+2. **Before the first push**: scrub personal details from the history (see the agent's memory and
+   ask the user).
 
 ## Shape of the thing
 

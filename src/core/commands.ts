@@ -11,6 +11,14 @@
  *  2. Nothing is fire-and-forget. Every command awaits its outcome within a
  *     timeout and comes back as a structured result, so a silent hang can never
  *     be mistaken for success.
+ *
+ * Commands queue in *lanes*. Most are answered by bridge.mrc on the spot and
+ * share the credit pool above. A few are answered only when the server
+ * replies, up to 50 s later for a connect (DEFERRED): bridge.mrc parks each of
+ * those in one pending slot per kind (%bridge_conn_id, %bridge_join_id, ...),
+ * so two of one kind must never overlap, and each kind gets a lane of its own.
+ * A single shared lane made every tool call wait behind a slow connect, even
+ * one on another network; mIRC itself sits idle while a connect is pending.
  */
 
 import {
@@ -26,6 +34,21 @@ import { FrameTooLargeError } from "./wire.ts";
 
 export const DEFAULT_MAX_IN_FLIGHT = 1;
 export const DEFAULT_COMMAND_TIMEOUT_MS = 10_000;
+
+/**
+ * Commands bridge.mrc answers later, on the server's reply rather than at once.
+ * Each has a single pending slot in the script, so each runs one at a time in a
+ * lane of its own. Everything else is answered on the spot.
+ */
+const DEFERRED: ReadonlySet<ActionName> = new Set<ActionName>([
+  "connect",
+  "join",
+  "part",
+  "nick",
+  "disconnect",
+  "ison",
+]);
+const IMMEDIATE_LANE = "immediate";
 
 /**
  * Permit pool. Releasing hands the permit straight to the next waiter rather than
@@ -76,6 +99,8 @@ class Gate {
 
 interface Pending {
   action: ActionName;
+  /** The lane whose permit this command holds, to hand back when it ends. */
+  gate: Gate;
   context: OutcomeContext;
   startedTs: number;
   timer: ReturnType<typeof setTimeout>;
@@ -109,7 +134,8 @@ export interface CommandDispatcherOptions {
 
 export class CommandDispatcher {
   #write: (frame: CmdFrame) => void;
-  #gate: Gate;
+  #maxInFlight: number;
+  #lanes = new Map<string, Gate>();
   #pending = new Map<string, Pending>();
   #seq = 0;
   #defaultTimeoutMs: number;
@@ -120,7 +146,9 @@ export class CommandDispatcher {
 
   constructor(options: CommandDispatcherOptions) {
     this.#write = options.write;
-    this.#gate = new Gate(options.maxInFlight ?? DEFAULT_MAX_IN_FLIGHT);
+    this.#maxInFlight = options.maxInFlight ?? DEFAULT_MAX_IN_FLIGHT;
+    // Built now rather than on first use, so a bad credit count fails at once.
+    this.#lanes.set(IMMEDIATE_LANE, new Gate(this.#maxInFlight));
     this.#defaultTimeoutMs = options.defaultTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
     this.#log = options.log;
     this.#liveness = options.liveness;
@@ -131,9 +159,22 @@ export class CommandDispatcher {
     return this.#pending.size;
   }
 
-  /** Commands waiting for a credit. */
+  /** Commands waiting for a credit, across every lane. */
   get queueDepth(): number {
-    return this.#gate.waiting;
+    let waiting = 0;
+    for (const gate of this.#lanes.values()) waiting += gate.waiting;
+    return waiting;
+  }
+
+  /** The lane a command queues in: its own kind if deferred, else the shared one. */
+  #laneFor(action: ActionName): Gate {
+    const key = DEFERRED.has(action) ? action : IMMEDIATE_LANE;
+    let gate = this.#lanes.get(key);
+    if (!gate) {
+      gate = new Gate(1);
+      this.#lanes.set(key, gate);
+    }
+    return gate;
   }
 
   async send(
@@ -143,11 +184,12 @@ export class CommandDispatcher {
   ): Promise<CommandOutcome> {
     if (this.#closed) return { ok: false, error: this.#disconnected() };
 
-    await this.#gate.acquire();
+    const gate = this.#laneFor(action);
+    await gate.acquire();
 
     // The socket can drop while this call was queued.
     if (this.#closed) {
-      this.#gate.release();
+      gate.release();
       return { ok: false, error: this.#disconnected() };
     }
 
@@ -162,7 +204,7 @@ export class CommandDispatcher {
         const entry = this.#pending.get(id);
         if (entry?.probe !== undefined) clearTimeout(entry.probe);
         this.#pending.delete(id);
-        this.#gate.release();
+        gate.release();
         const silence = this.#liveness?.explainSilence(startedTs);
         this.#log?.warn("action.outcome", {
           id,
@@ -186,7 +228,7 @@ export class CommandDispatcher {
         ? setTimeout(() => this.#liveness?.probe(), Math.min(PROBE_AFTER_MS, timeoutMs / 2))
         : undefined;
 
-      this.#pending.set(id, { action, context, startedTs, timer, probe, resolve });
+      this.#pending.set(id, { action, gate, context, startedTs, timer, probe, resolve });
 
       try {
         this.#write({ t: "cmd", id, action, params });
@@ -194,7 +236,7 @@ export class CommandDispatcher {
         clearTimeout(timer);
         if (probe !== undefined) clearTimeout(probe);
         this.#pending.delete(id);
-        this.#gate.release();
+        gate.release();
         // An oversized frame is the caller's input, not a broken link, and an
         // agent can fix it by shortening the text; say that rather than
         // claiming mIRC is unreachable.
@@ -220,7 +262,7 @@ export class CommandDispatcher {
     clearTimeout(entry.timer);
     if (entry.probe !== undefined) clearTimeout(entry.probe);
     this.#pending.delete(frame.id);
-    this.#gate.release();
+    entry.gate.release();
 
     const outcome = normalizeRes(frame, entry.context);
     this.#log?.debug("action.outcome", {
@@ -252,7 +294,7 @@ export class CommandDispatcher {
     }
     // Commands still queued for a credit have no timer of their own, so they must
     // be woken explicitly or they would hang until the process exits.
-    this.#gate.drain();
+    for (const gate of this.#lanes.values()) gate.drain();
   }
 
   #disconnected(): BridgeError {
