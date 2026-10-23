@@ -2180,10 +2180,10 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         // Seen with a small local model: told to call back "in a minute or so",
         // it ended its turn promising to check, and never did. The bot answered
         // 4.6 minutes after the search, into a cursor nobody collected.
-        next: "No answer yet; search bots queue searches, and one took 4.6 minutes. Call " +
+        next: "No answer yet; search bots queue searches, and one took almost 5 minutes. Call " +
           "xdcc_search_results {cursor: " + cursor + ", channel: " + JSON.stringify(channel) +
           "} now: it waits up to ~50 s by itself. Each time it comes back pending, call it " +
-          "again with the same cursor, for up to about 5 minutes, before telling the user " +
+          "again with the same cursor, for up to about 8 minutes, before telling the user " +
           "nothing came back. Do not end your turn to check later: nothing is collected until " +
           "you call. Do NOT search again, which only queues another search.",
       });

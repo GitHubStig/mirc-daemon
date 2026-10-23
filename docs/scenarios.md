@@ -130,7 +130,7 @@ What carries over is how the tools must be written, because a weak model shows e
 
 - **Claude Haiku** (Claude Code, from an empty folder): passed 1 to 7 after three rounds, before the
   later tool changes.
-- **Gemma 4 12B, Q4, in `pi`** (`direct` mode; `codemod` never got a call through): 1, 2, 3 and 5
-  pass. On 4 every step of its own is now right; the bot's answer was lost to a services rename,
-  which is fixed and waits for a rerun. 6 and 7 not run yet. Its thinking sometimes collapses into
-  one repeated line, which no tool change helps.
+- **Gemma 4 12B, Q4, in `pi`** (`direct` mode; `codemod` never got a call through): 1 to 5 pass. On
+  4 the search waited out the services rename, went out under the Guest nick, and the bot's answer
+  ("no results") came 4 min 44 s later, into the agent's sixth `xdcc_search_results` call. 6 and 7
+  not run yet. Its thinking sometimes collapses into one repeated line, which no tool change helps.
