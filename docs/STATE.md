@@ -5,7 +5,7 @@ decision see `docs/adr/`. This file is about what is true **right now**.
 
 ## Short version
 
-_Last updated 2026-10-23. Protocol **v3**, 23 MCP tools._
+_Last updated 2026-10-23. Protocol **v3**, 24 MCP tools._
 
 Everything an agent needs works against a real mIRC 7.85:
 
@@ -22,7 +22,7 @@ Everything an agent needs works against a real mIRC 7.85:
 
 **What is left:**
 
-- the refused-join check, which needs a `+i` channel held by someone else;
+- a join refused for a wrong key (475): it cannot be staged inside one mIRC, see "Not verified";
 - the bot's queue (`queued` with a position) against a real bot; this one always sent at once;
 - a real stall: the 60 s _stalled_ state is unit-tested, not yet seen live.
 
@@ -44,6 +44,9 @@ lines), this file, then `docs/adr/` (0010 and 0012 cover most recent work).
   Self-send (below) also tests DCC with no bot.
 - **Nothing sent to IRC may mark the traffic as automated.** No agent nick, and mIRC's own default
   quit message unless the user gives one.
+- **At most one agent connection per network the user is on.** More connections from one host risk a
+  ban, EFnet above all. When a test needs a second client there, ask to use the user's own
+  connection.
 - **The user's things are theirs.** The agent may use the user's connections and channels. It
   leaves, disconnects or renames only when asked, and with `confirm: true` on anything it did not
   open itself.
@@ -118,10 +121,11 @@ Proven by running it, with evidence in the log:
   by the SDK's own client. The frame shapes `bridge.mrc` emits are covered in
   `tests/bridge_contract_test.ts`. The tests cannot prove mIRC _runs_ a handler; see traps 15
   and 16.
-- **The 23 tools**:
+- **The 24 tools**:
   - status: `daemon_status`, `irc_list_sessions`, `irc_get_state`;
   - reading and waiting: `irc_read`, `irc_wait_for`, `irc_members`, `irc_ison`;
-  - connections: `irc_connect`, `irc_ensure_connected`, `irc_disconnect`, `irc_nick`;
+  - connections: `irc_connect`, `irc_ensure_connected`, `irc_disconnect`, `irc_nick`,
+    `irc_close_windows`;
   - channels: `irc_join`, `irc_ensure_joined`, `irc_part`;
   - speaking: `irc_send`, `irc_notice`, `irc_notify`;
   - DCC and XDCC: `irc_dcc_status`, `irc_dcc_watch`, `xdcc_list`, `xdcc_fetch`, `xdcc_cancel`;
@@ -291,6 +295,25 @@ Proven by running it, with evidence in the log:
   event, so `irc_list_sessions` (which does not refresh) shows it until the next refresh, which
   every acting tool does first.
 
+- **A refused join, and `irc_raw` allowed** (2026-10-23, daemon run with `--allow-raw`).
+  - An agent EFnet connection (`cid 2662`, `` me2 ``) created `#mircd-test-da1b`, which made it
+    channel operator, and set `+i` with `irc_raw {cid, line: "MODE … +i", confirm: true}`.
+  - The user's connection (`cid 1`, with their go-ahead) then tried to join. It got `join_failed`,
+    "the channel is invite-only", in 250 ms, and the 473 also arrived as a raw event.
+  - On williamgattone the same test failed to set up: that network does not give a channel's creator
+    operator status, and the `MODE` came back as `482 You're not channel operator`, as a raw event
+    on the right connection. So `irc_raw` sends, and the server's answer is seen.
+  - **`cid` on the per-connection tools.** `irc_join`, `irc_ensure_joined`, `irc_send`,
+    `irc_notice`, `irc_members`, `irc_ison` and `irc_raw` now take `cid`. With two connections on
+    one network the name alone is ambiguous, and this test was impossible without it.
+  - **mIRC's auto-join applies to agent connections too.** The agent's EFnet connection was joined
+    to `#home!` by the user's EFnet auto-join.
+- **Closing windows** (2026-10-23). mIRC's `/close -it` closes every status window that is neither
+  connected nor connecting, on every connection at once, with what is open inside it. Nothing tried
+  closes just one: `/window -c` on a status window does nothing. So `irc_close_windows` closes all
+  disconnected windows. It refreshes first, and refuses without `confirm: true` if any of them is
+  the user's, naming them. Live: an agent window was opened, disconnected and closed in 41 ms.
+
 ## Not verified
 
 Assumed or untested. Treat these as the actual risk surface.
@@ -298,12 +321,11 @@ Assumed or untested. Treat these as the actual risk surface.
 - **Reconnecting a user's quit window** rejoins whatever channels were still open in it, if mIRC's
   rejoin option is on. That is expected, but not yet seen live.
 
-Carried over:
-
-1. `irc_join` on a channel that refuses you fails with a code within 8s, **and** the refusal also
-   appears as a raw event. This needs a `+i` or `+k` channel held by someone else: they
-   `/join #some-test`, `/mode #some-test +i`, and stay in it. With a 477 refusal, also check that
-   the hint names the current nick and any services rename.
+- **A wrong-key refusal (475)** cannot be staged inside one mIRC. When an agent connection set `+k`
+  on a test channel, the user's connection, in the same mIRC, then joined with no key given and got
+  in. mIRC evidently supplied the key it had just seen. The mapping (475 → `join_failed`, "the
+  channel requires a key") is unit-tested only. The 477 hint (registered nick, services rename) is
+  also unseen live.
 
 **XDCC, still unseen live:** a bot's queue (`queued` with a position); this bot always sent at once.
 And a real stall: the daemon now calls a transfer _stalled_ after 60 s without new bytes, whatever
@@ -320,9 +342,8 @@ refused job with `xdcc_cancel {tellBot: false}`.
 
 Beyond those:
 
-- **`raw` gating** is default-deny, and tested both ways, but only seen live as "denied". Decided
-  (2026-10-23): keep it. It is the escape hatch for what the tools do not cover (WHOIS, MODE), and
-  off by default is right.
+- **`raw` gating**: decided (2026-10-23) to keep it. It is the escape hatch for what the tools do
+  not cover (WHOIS, MODE), and off by default is right.
 - **The heartbeat's "silent" path** is unit-tested only: no real hang has been seen. One mSL command
   at a time also means a pending connect (up to 50 s) holds up every other tool call, the progress
   poll included. That is known, and not yet worth reworking.
@@ -455,7 +476,7 @@ minimised **`@bridge`** window, not the active channel. Available while debuggin
 ## Next, in order
 
 1. **Close the remaining live gaps** under "Not verified" when the chance arises: a bot's queue; a
-   real stall; the refused-join check, which needs someone holding a `+i` channel.
+   real stall.
 2. **Maybe**: let other commands through while a connect waits (it holds mIRC's one command slot for
    up to 50 s). That needs care: the connect, join, part and nick replies each use one pending
    variable in `bridge.mrc`, and the single slot is what keeps them from colliding.

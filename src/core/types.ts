@@ -232,7 +232,9 @@ export type ActionName =
   | "disconnect"
   | "dccstop"
   /** mIRC's open downloads ($get), polled while a transfer runs. */
-  | "gets";
+  | "gets"
+  /** Close every disconnected connection window (mIRC's /close -it). */
+  | "closewin";
 
 export interface CmdFrame {
   t: "cmd";

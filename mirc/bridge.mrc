@@ -335,6 +335,12 @@ alias -l bridge_command {
   if (%act == disconnect) { bridge_do_disconnect %id $jparam(%f, message) | return }
   if (%act == dccstop) { bridge_do_dccstop %id $jparam(%f, nick) | return }
   if (%act == gets) { bridge_ok %id $bridge_getspayload | return }
+  ; Every disconnected connection window, with what is open inside it. -t is
+  ; status windows and -i only those neither connected nor connecting, so a live
+  ; connection is never touched. Verified live (mIRC 7.85, 2026-10-23): it acts
+  ; on all connections at once; nothing tried closes just one (/window -c on a
+  ; status window does nothing). The daemon decides whether that is allowed.
+  if (%act == closewin) { close -it | bridge_ok %id | return }
   bridge_fail %id 0 unknown-action-$+(%act)
 }
 

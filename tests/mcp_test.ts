@@ -163,6 +163,7 @@ Deno.test("the MCP surface advertises the tools an agent needs", async () => {
     for (
       const expected of [
         "daemon_status",
+        "irc_close_windows",
         "irc_connect",
         "irc_dcc_status",
         "irc_ensure_connected",
@@ -738,6 +739,54 @@ Deno.test("the agent's own connection can be closed; the user's needs confirm", 
     assertEquals(sent.map((c) => c.params?.cid), [7]);
     // No message given: none is sent, so mIRC quits with its own default.
     assertEquals(sent[0].params?.message, undefined);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("irc_close_windows closes the agent's idle windows; the user's need confirm", async () => {
+  const s = await stack();
+  try {
+    growOnConnect(s, 7, "Rizon");
+    await s.client.callTool({
+      name: "irc_ensure_connected",
+      arguments: { network: "Rizon", server: "irc.rizon.net" },
+    });
+    const rizonQuit = network({
+      cid: 7,
+      name: "Rizon",
+      status: "disconnected",
+      channels: [],
+      members: {},
+    });
+    // mIRC as it behaved live: /close -it removes every disconnected window.
+    s.fake.setHandler((cmd, fake) => {
+      if (cmd.action === "disconnect") fake.setNetworks([network(), rizonQuit]);
+      if (cmd.action === "closewin") fake.setNetworks([network()]);
+      return undefined;
+    });
+
+    const nothing = JSON.parse(textOf(
+      await s.client.callTool({ name: "irc_close_windows", arguments: {} }),
+    ));
+    assertEquals(nothing.skipped, true);
+
+    await s.client.callTool({ name: "irc_disconnect", arguments: { cid: 7 } });
+    const closed = JSON.parse(textOf(
+      await s.client.callTool({ name: "irc_close_windows", arguments: {} }),
+    ));
+    assertEquals(closed.closed, [{ cid: 7, name: "Rizon" }]);
+
+    // A disconnected window of the user's would go too, so it needs their say-so.
+    s.fake.setNetworks([
+      network(),
+      network({ cid: 9, name: "Libera", status: "disconnected", channels: [], members: {} }),
+    ]);
+    const before = s.fake.received.filter((c) => c.action === "closewin").length;
+    const users = await s.client.callTool({ name: "irc_close_windows", arguments: {} });
+    assertEquals(textOf(users).startsWith("guard_denied:"), true);
+    assertEquals(textOf(users).includes("cid 9 (Libera)"), true);
+    assertEquals(s.fake.received.filter((c) => c.action === "closewin").length, before);
   } finally {
     await s.stop();
   }
@@ -1570,6 +1619,36 @@ Deno.test("two connections on one network: cid picks one, the name alone is refu
     assertEquals(sent.length, 1);
     assertEquals(sent[0].params?.cid, 1751);
     assertEquals(sent[0].params?.message, "i'm not a bot");
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("join, send and raw take a cid too, so either of two connections can be used", async () => {
+  // The refused-join test, live: one connection holds a +i channel, the other is refused.
+  const s = await stack({ allowRaw: true });
+  try {
+    s.fake.setNetworks([network(), network({ cid: 2662, channels: [], members: {} })]);
+    await s.mirc.registry.resolve()!.refreshState();
+    s.fake.setHandler((cmd) =>
+      cmd.action === "join" ? { ok: true, data: { joined: "#t", members: 1 } } : undefined
+    );
+
+    const vague = await s.client.callTool({ name: "irc_join", arguments: { channel: "#t" } });
+    assertEquals(textOf(vague).startsWith("ambiguous_network:"), true);
+
+    await s.client.callTool({ name: "irc_join", arguments: { cid: 2662, channel: "#t" } });
+    await s.client.callTool({
+      name: "irc_raw",
+      arguments: { cid: 2662, line: "MODE #t +i", confirm: true },
+    });
+    await s.client.callTool({ name: "irc_send", arguments: { cid: 1, target: "#t", text: "hi" } });
+    const sent = s.fake.received.filter((c) => ["join", "raw", "msg"].includes(c.action));
+    assertEquals(sent.map((c) => [c.action, c.params?.cid]), [
+      ["join", 2662],
+      ["raw", 2662],
+      ["msg", 1],
+    ]);
   } finally {
     await s.stop();
   }

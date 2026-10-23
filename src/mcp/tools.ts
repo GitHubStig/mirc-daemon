@@ -321,6 +321,13 @@ const networkArg = z
   .string()
   .optional()
   .describe("Network name; omit when only one is connected.");
+const cidArg = z
+  .int()
+  .optional()
+  .describe(
+    "A specific connection, from irc_get_state. Only needed when two connections share a " +
+      "network and the network name alone is ambiguous.",
+  );
 
 // Schemas. Declared as objects so `z.infer` can type each handler.
 const emptySchema = z.object({});
@@ -345,11 +352,13 @@ const readSchema = z.object({
 const membersSchema = z.object({
   session: sessionArg,
   network: networkArg,
+  cid: cidArg,
   channel: z.string(),
 });
 const isonSchema = z.object({
   session: sessionArg,
   network: networkArg,
+  cid: cidArg,
   nicks: z.array(z.string()).min(1),
 });
 const connectSchema = z.object({
@@ -379,12 +388,14 @@ const ensureConnectedSchema = z.object({
 const joinSchema = z.object({
   session: sessionArg,
   network: networkArg,
+  cid: cidArg,
   channel: z.string(),
   key: z.string().optional(),
 });
 const ensureJoinedSchema = z.object({
   session: sessionArg,
   network: networkArg,
+  cid: cidArg,
   channel: z.string(),
 });
 /**
@@ -400,13 +411,6 @@ const confirmArg = z
     "Set true ONLY when the user explicitly asked for this. Needed for anything the agent did " +
       "not open or join itself, i.e. the user's own channels and connections.",
   );
-const cidArg = z
-  .int()
-  .optional()
-  .describe(
-    "A specific connection, from irc_get_state. Only needed when two connections share a " +
-      "network and the network name alone is ambiguous.",
-  );
 const partSchema = z.object({
   session: sessionArg,
   network: networkArg,
@@ -418,6 +422,7 @@ const partSchema = z.object({
     .describe("Part message, as /part #chan <message>. Omit to leave without one."),
   confirm: confirmArg,
 });
+const closeWindowsSchema = z.object({ session: sessionArg, confirm: confirmArg });
 const disconnectSchema = z.object({
   session: sessionArg,
   network: z
@@ -441,6 +446,7 @@ const nickSchema = z.object({
 const sendSchema = z.object({
   session: sessionArg,
   network: networkArg,
+  cid: cidArg,
   target: z.string(),
   text: z.string().min(1),
 });
@@ -510,6 +516,7 @@ const xdccFetchSchema = z.object({
 const rawSchema = z.object({
   session: sessionArg,
   network: networkArg,
+  cid: cidArg,
   line: z.string().min(1),
   confirm: z.literal(true).describe("Must be true, to make this a deliberate choice."),
 });
@@ -525,6 +532,7 @@ type JoinArgs = z.infer<typeof joinSchema>;
 type EnsureJoinedArgs = z.infer<typeof ensureJoinedSchema>;
 type PartArgs = z.infer<typeof partSchema>;
 type DisconnectArgs = z.infer<typeof disconnectSchema>;
+type CloseWindowsArgs = z.infer<typeof closeWindowsSchema>;
 type NickArgs = z.infer<typeof nickSchema>;
 type SendArgs = z.infer<typeof sendSchema>;
 type NotifyArgs = z.infer<typeof notifySchema>;
@@ -702,10 +710,10 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         "Who is in a channel. Large channels return a truncated name list with the full count.",
       inputSchema: membersSchema.shape,
     },
-    ({ session, network, channel }: MembersArgs) =>
+    ({ session, network, cid, channel }: MembersArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        const net = await targetOf(s, network, stateFreshnessMs);
+        const net = await targetOf(s, network, stateFreshnessMs, cid);
         const outcome = await s.commands.send("members", { cid: net.cid, channel });
         if (!outcome.ok) return failure(outcome.error);
         const names = Array.isArray(outcome.data?.names) ? (outcome.data!.names as string[]) : [];
@@ -725,10 +733,10 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
       description: "Check which of the given nicks are online on a network.",
       inputSchema: isonSchema.shape,
     },
-    ({ session, network, nicks }: IsonArgs) =>
+    ({ session, network, cid, nicks }: IsonArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        const net = await targetOf(s, network, stateFreshnessMs);
+        const net = await targetOf(s, network, stateFreshnessMs, cid);
         // A space-separated string, not an array: mSL found arrays by bracket
         // position, and nicks like [XDCC]Bot contain brackets.
         const outcome = await s.commands.send("ison", { cid: net.cid, list: nicks.join(" ") });
@@ -917,10 +925,10 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         "an empty channel often means the name is wrong.",
       inputSchema: joinSchema.shape,
     },
-    ({ session, network, channel, key }: JoinArgs) =>
+    ({ session, network, cid, channel, key }: JoinArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        const net = await targetOf(s, network, stateFreshnessMs);
+        const net = await targetOf(s, network, stateFreshnessMs, cid);
         const outcome = await s.commands.send("join", { cid: net.cid, channel, key }, {
           context: "join",
         });
@@ -944,10 +952,10 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         "to use before messaging a bot.",
       inputSchema: ensureJoinedSchema.shape,
     },
-    ({ session, network, channel }: EnsureJoinedArgs) =>
+    ({ session, network, cid, channel }: EnsureJoinedArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        const net = await targetOf(s, network, stateFreshnessMs);
+        const net = await targetOf(s, network, stateFreshnessMs, cid);
         if (s.state.isJoined(net, channel)) {
           return json({
             skipped: true,
@@ -992,6 +1000,50 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           return usersOwn(channel, net);
         }
         return fromOutcome(await s.commands.send("part", { cid: net.cid, channel, message }));
+      }),
+  );
+
+  tool(
+    "irc_close_windows",
+    {
+      description:
+        "Close every disconnected connection window in mIRC (each status window and everything " +
+        "in it), to tidy up after the agent. Connected and connecting windows are never " +
+        "touched; irc_disconnect first. mIRC can only close them all at once, so if any " +
+        "disconnected window is the user's, this needs confirm: true, and only when the user " +
+        "asked.",
+      inputSchema: closeWindowsSchema.shape,
+    },
+    ({ session, confirm }: CloseWindowsArgs) =>
+      guarded(async () => {
+        const s = sessionOf(registry, session);
+        // Fresh, not cached: this decides whose windows are about to go.
+        const refreshed = await s.refreshState();
+        if (refreshed) return failure(refreshed);
+        const idle = s.state.networks().filter((n) => n.status === "disconnected");
+        if (idle.length === 0) {
+          return json({ skipped: true, reason: "no disconnected windows", closed: [] });
+        }
+        const users = idle.filter((n) => !s.owned.ownsConnection(n.cid));
+        if (users.length > 0 && confirm !== true) {
+          return failure(
+            bridgeError(
+              "guard_denied",
+              "mIRC closes every disconnected window at once, and these are the user's: " +
+                users.map((n) => `cid ${n.cid} (${n.name})`).join(", ") +
+                ". Only close them if the user asked; then repeat with confirm: true.",
+            ),
+          );
+        }
+        const outcome = await s.commands.send("closewin");
+        if (!outcome.ok) return failure(outcome.error);
+        // The refresh also drops the closed windows' receipts.
+        const after = await s.refreshState();
+        if (after) return failure(after);
+        const left = new Set(s.state.networks().map((n) => n.cid));
+        return json({
+          closed: idle.filter((n) => !left.has(n.cid)).map((n) => ({ cid: n.cid, name: n.name })),
+        });
       }),
   );
 
@@ -1069,10 +1121,10 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         "acknowledge delivery, so a refusal (e.g. 401 no such nick) arrives later as a raw event.",
       inputSchema: sendSchema.shape,
     },
-    ({ session, network, target, text }: SendArgs) =>
+    ({ session, network, cid, target, text }: SendArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        const net = await targetOf(s, network, stateFreshnessMs);
+        const net = await targetOf(s, network, stateFreshnessMs, cid);
         return fromOutcome(
           await s.commands.send("msg", { cid: net.cid, target, text }, { context: "message" }),
         );
@@ -1085,10 +1137,10 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
       description: "Send a NOTICE. Many IRC bots accept commands this way rather than by PRIVMSG.",
       inputSchema: sendSchema.shape,
     },
-    ({ session, network, target, text }: SendArgs) =>
+    ({ session, network, cid, target, text }: SendArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        const net = await targetOf(s, network, stateFreshnessMs);
+        const net = await targetOf(s, network, stateFreshnessMs, cid);
         return fromOutcome(
           await s.commands.send("notice", { cid: net.cid, target, text }, { context: "message" }),
         );
@@ -1574,7 +1626,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         "it can do anything the IRC protocol can.",
       inputSchema: rawSchema.shape,
     },
-    ({ session, network, line }: RawArgs) =>
+    ({ session, network, cid, line }: RawArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
         if (!allowRaw) {
@@ -1587,7 +1639,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
             ),
           );
         }
-        const net = await targetOf(s, network, stateFreshnessMs);
+        const net = await targetOf(s, network, stateFreshnessMs, cid);
         return fromOutcome(await s.commands.send("raw", { cid: net.cid, line }));
       }),
   );
