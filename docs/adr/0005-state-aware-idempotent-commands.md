@@ -31,3 +31,9 @@ fails with `ambiguous_network` rather than picking.
 - Picking the wrong network would send commands to the wrong server, so ambiguity is an error rather
   than a coin flip.
 - Every command costs a possible extra round trip to refresh state.
+- **One tool per step, ensure-shaped under the plain name** (amended 2026-10-23). There is no
+  "plain" variant beside an "ensure" one: `irc_connect` absorbed `irc_ensure_connected`, and
+  `irc_join` absorbed `irc_ensure_joined`. Each pair sent mIRC the same command, and agents tripped
+  over the choice. Claude Haiku picked the plain connect and skipped the state check, and a small
+  local model called the ensure join over and over. A step that is already done says so in words,
+  and says not to repeat it, rather than answering with a bare `skipped` flag.

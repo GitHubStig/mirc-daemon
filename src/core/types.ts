@@ -423,6 +423,8 @@ export interface DaemonStatus {
   agentsAttached: number;
   lastStateRefreshTs?: number;
   dccJobs: number;
+  /** Every attached mIRC client and the networks it is on, when there is more than one. */
+  clients?: Array<SessionInfo & { networks: string[] }>;
   /** Set while mIRC owes a ping answer: how long it has sent nothing. */
   mircSilentForSecs?: number;
   /** What that likely means, for the agent to relay. */

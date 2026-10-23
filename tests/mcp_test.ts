@@ -166,14 +166,12 @@ Deno.test("the MCP surface advertises the tools an agent needs", async () => {
         "irc_close_windows",
         "irc_connect",
         "irc_dcc_status",
-        "irc_ensure_joined",
         "irc_get_state",
         "irc_history",
         "irc_ison",
         "irc_join",
         "irc_members",
         "irc_mode",
-        "irc_notice",
         "irc_notify",
         "irc_part",
         "irc_raw",
@@ -187,6 +185,13 @@ Deno.test("the MCP surface advertises the tools an agent needs", async () => {
       ]
     ) {
       assertEquals(names.includes(expected), true, `missing tool: ${expected}`);
+    }
+    // Merged into the tools above. Near-duplicates confused a small local
+    // model into calling one over and over, so they must not come back.
+    for (
+      const merged of ["irc_ensure_joined", "irc_notice", "irc_dcc_watch", "irc_list_sessions"]
+    ) {
+      assertEquals(names.includes(merged), false, `merged tool is back: ${merged}`);
     }
 
     // Descriptions are model-facing, so an empty one is a defect.
@@ -716,7 +721,7 @@ Deno.test("a channel the agent joined itself can be left freely", async () => {
       fake.emit("join", { buf: "#bots", nick: "me" });
       return { ok: true, data: { joined: "#bots", members: 10 }, delayMs: 20 };
     });
-    await s.client.callTool({ name: "irc_ensure_joined", arguments: { channel: "#bots" } });
+    await s.client.callTool({ name: "irc_join", arguments: { channel: "#bots" } });
     s.fake.setHandler(undefined);
     const state = JSON.parse(
       textOf(await s.client.callTool({ name: "irc_get_state", arguments: {} })),
@@ -1320,7 +1325,7 @@ Deno.test("xdcc_fetch: a queued request returns the position and keeps the job o
   }
 });
 
-Deno.test("xdcc_fetch: no answer yet is not an error, and irc_dcc_watch catches the late one", async () => {
+Deno.test("xdcc_fetch: no answer yet is not an error, and irc_dcc_status {wait: true} catches the late one", async () => {
   const s = await stack();
   try {
     botAnswers(s, undefined);
@@ -1332,8 +1337,8 @@ Deno.test("xdcc_fetch: no answer yet is not an error, and irc_dcc_watch catches 
 
     // The bot answers minutes later, as AxA-MP1 did; here, while a watch waits.
     const watching = s.client.callTool({
-      name: "irc_dcc_watch",
-      arguments: { job: body.job.id, timeoutMs: 3000 },
+      name: "irc_dcc_status",
+      arguments: { job: body.job.id, wait: true, timeoutMs: 3000 },
     });
     await new Promise((resolve) => setTimeout(resolve, 100));
     s.fake.emit("notice", {
@@ -1652,7 +1657,7 @@ Deno.test("xdcc_fetch requests nothing while the topic names channels mIRC is no
     assertEquals(s.fake.received.some((c) => c.action === "msg"), false);
 
     // The agent joins as the topic asks; then the same call goes through.
-    await s.client.callTool({ name: "irc_ensure_joined", arguments: { channel: "#Chat-Main" } });
+    await s.client.callTool({ name: "irc_join", arguments: { channel: "#Chat-Main" } });
     await s.client.callTool({ name: "xdcc_fetch", arguments: { ...fetchArgs, timeoutMs: 600 } });
     assertEquals(
       s.fake.received.filter((c) => c.action === "msg").map((c) => c.params?.text),
@@ -1680,15 +1685,56 @@ Deno.test("xdcc_fetch goes ahead past a mere mention once the agent says it read
   }
 });
 
-Deno.test("irc_ensure_joined returns the topic, even for a channel already joined", async () => {
+Deno.test("irc_join returns the topic, even for a channel already joined, and says nothing more is needed", async () => {
   const s = await stack();
   try {
     topicChannel(s, "Be in #Chat-Main too.");
     const body = JSON.parse(textOf(
-      await s.client.callTool({ name: "irc_ensure_joined", arguments: { channel: "#chan" } }),
+      await s.client.callTool({ name: "irc_join", arguments: { channel: "#chan" } }),
     ));
-    assertEquals(body.skipped, true);
+    assertEquals(body.already, true);
     assertEquals(body.topic, "Be in #Chat-Main too.");
+    assertEquals(body.done.includes("Do not join it again"), true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("irc_join passes a key, and a fresh join says so in words", async () => {
+  const s = await stack();
+  try {
+    s.fake.setHandler((cmd) =>
+      cmd.action === "join"
+        ? { ok: true, data: { joined: "#HiGH-VoLtAgE", members: 42, topic: "" } }
+        : undefined
+    );
+    const body = JSON.parse(textOf(
+      await s.client.callTool({
+        name: "irc_join",
+        arguments: { channel: "#high-voltage", key: "sekrit" },
+      }),
+    ));
+    assertEquals(body.already, false);
+    assertEquals(body.channel, "#HiGH-VoLtAgE");
+    assertEquals(body.topic, null);
+    assertEquals(body.done.startsWith("Joined #HiGH-VoLtAgE"), true);
+    const join = s.fake.received.find((c) => c.action === "join");
+    assertEquals(join?.params?.key, "sekrit");
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("irc_send sends a NOTICE with notice: true, a PRIVMSG without", async () => {
+  const s = await stack();
+  try {
+    await s.client.callTool({ name: "irc_send", arguments: { target: "Bot", text: "hi" } });
+    await s.client.callTool({
+      name: "irc_send",
+      arguments: { target: "Bot", text: "xdcc list", notice: true },
+    });
+    const sent = s.fake.received.filter((c) => c.action === "msg" || c.action === "notice");
+    assertEquals(sent.map((c) => c.action), ["msg", "notice"]);
   } finally {
     await s.stop();
   }
@@ -1934,7 +1980,7 @@ Deno.test("irc_dcc_status asks mIRC for progress and reports a running transfer"
     ));
     assertEquals(status.job.state, "downloading");
     assertEquals(status.progress, "832.6 MB of 1.6 GB (50%), 1.9 MB/s");
-    assertEquals(status.next.includes("irc_dcc_watch"), true);
+    assertEquals(status.next.includes("wait: true"), true);
   } finally {
     await s.stop();
   }
@@ -1961,7 +2007,7 @@ Deno.test("an older bridge.mrc without gets just means no progress", async () =>
   }
 });
 
-Deno.test("a reply the daemon cannot read wakes irc_dcc_watch and is handed to the agent", async () => {
+Deno.test("a reply the daemon cannot read wakes irc_dcc_status {wait: true} and is handed to the agent", async () => {
   const s = await stack();
   try {
     botAnswers(s, undefined);
@@ -1969,8 +2015,8 @@ Deno.test("a reply the daemon cannot read wakes irc_dcc_watch and is handed to t
       await s.client.callTool({ name: "xdcc_fetch", arguments: { ...fetchArgs, timeoutMs: 600 } }),
     ));
     const watching = s.client.callTool({
-      name: "irc_dcc_watch",
-      arguments: { job: body.job.id, timeoutMs: 3000 },
+      name: "irc_dcc_status",
+      arguments: { job: body.job.id, wait: true, timeoutMs: 3000 },
     });
     await new Promise((resolve) => setTimeout(resolve, 100));
     // A refusal, in Portuguese.
@@ -2122,13 +2168,13 @@ Deno.test("a wait whose mIRC link drops says so at once instead of going deaf", 
   }
 });
 
-Deno.test("irc_dcc_watch also reports a dropped link rather than 'no change'", async () => {
+Deno.test("irc_dcc_status {wait: true} also reports a dropped link rather than 'no change'", async () => {
   const s = await stack();
   try {
     const job = s.mirc.registry.resolve()!.dcc.start({ cid: 1, net: "net1", bot: "Bot" });
     const watching = s.client.callTool({
-      name: "irc_dcc_watch",
-      arguments: { job: job.id, timeoutMs: 20_000 },
+      name: "irc_dcc_status",
+      arguments: { job: job.id, wait: true, timeoutMs: 20_000 },
     });
     await new Promise((resolve) => setTimeout(resolve, 100));
     await s.fake.close();

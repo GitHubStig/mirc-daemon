@@ -5,7 +5,7 @@ decision see `docs/adr/`. This file is about what is true **right now**.
 
 ## Short version
 
-_Last updated 2026-10-23. Protocol **v3**, 29 MCP tools._
+_Last updated 2026-10-23. Protocol **v3**._
 
 Everything an agent needs works against a real mIRC 7.85:
 
@@ -113,24 +113,22 @@ Proven by running it, with evidence in the log:
   member counts.
 - **Daemon runs**: `deno task start` binds `127.0.0.1:8686` (mIRC, raw TCP) and `127.0.0.1:8687`
   (agents, HTTP). `/health` is unauthenticated, `/status` and `/mcp` require the bearer token.
-- **The automated tests** (`deno task test`) cover: MBP framing including CRLF and oversize
-  rejection, logging with redaction, the state model, the event log and waits, credit-limited
-  command dispatch, the failure taxonomy, DCC job tracking and the XDCC reply classifier, ownership
-  receipts, the listener, config, the INI reader, the HTTP door, and the 23-tool MCP surface driven
-  by the SDK's own client. The frame shapes `bridge.mrc` emits are covered in
-  `tests/bridge_contract_test.ts`. The tests cannot prove mIRC _runs_ a handler; see traps 15
-  and 16.
-- **The 29 tools**:
-  - status: `daemon_status`, `irc_list_sessions`, `irc_get_state`;
+- **The tools**:
+  - status: `daemon_status` (which lists the mIRC clients when several are attached),
+    `irc_get_state`;
   - reading and waiting: `irc_read`, `irc_history`, `irc_wait_for`, `irc_members`, `irc_ison`,
     `irc_whois`;
-  - connections: `irc_connect` (which absorbed `irc_ensure_connected`), `irc_disconnect`,
-    `irc_nick`, `irc_close_windows`;
-  - channels: `irc_join`, `irc_ensure_joined`, `irc_part`, `irc_topic`, `irc_mode`;
-  - speaking: `irc_send`, `irc_notice`, `irc_notify`;
-  - DCC and XDCC: `irc_dcc_status`, `irc_dcc_watch`, `xdcc_list`, `xdcc_search`,
-    `xdcc_search_results`, `xdcc_fetch`, `xdcc_cancel`;
+  - connections: `irc_connect`, `irc_disconnect`, `irc_nick`, `irc_close_windows`;
+  - channels: `irc_join`, `irc_part`, `irc_topic`, `irc_mode`;
+  - speaking: `irc_send` (a NOTICE with `notice: true`), `irc_notify`;
+  - DCC and XDCC: `irc_dcc_status` (waits for a change with `wait: true`), `xdcc_list`,
+    `xdcc_search`, `xdcc_search_results`, `xdcc_fetch`, `xdcc_cancel`;
   - gated: `irc_raw`, off unless the daemon runs with `--allow-raw`.
+
+  Near-duplicates were merged (ADR-0005): `irc_connect` absorbed `irc_ensure_connected`, `irc_join`
+  absorbed `irc_ensure_joined`, `irc_send` absorbed `irc_notice`, `irc_dcc_status` absorbed
+  `irc_dcc_watch`, and `irc_list_sessions` went. A small local model looped on the choice between
+  two joins.
 - **The mSL script** sends and receives: the read loop drains, dispatch parses, replies go out.
 - **Protocol v2 in mIRC** (2026-10-22): the hello carries `"v":2` and is accepted. `/bridge.diag`
   prints `jval-test t=cmdid=c1action=state` (the pieces are joined without spaces; the values are
@@ -142,7 +140,7 @@ Proven by running it, with evidence in the log:
     members.
   - `irc_ison` made a real server round trip, with present and absent nicks both reported correctly.
   - `irc_join` on a channel already joined returned at once with `already: true`, and
-    `irc_ensure_joined` skipped it.
+    `irc_ensure_joined` (since merged into `irc_join`) skipped it.
   - `irc_notify` echoed into mIRC.
   - `irc_send` to our own nick, then `irc_wait_for`: a line with a quote pair, a backslash, `ü` and
     a bold code came back from the server **byte for byte** in about 220 ms. That also proves an
@@ -293,8 +291,7 @@ Proven by running it, with evidence in the log:
   same server got **`cid 1696`**, marked `openedByAgent: true`. It was then closed without `confirm`
   in 487 ms. mIRC does not reuse a closed window's id within a run, and the ids seen have only
   grown, so a stale receipt cannot land on a later window of the user's. Closing a window raises no
-  event, so `irc_list_sessions` (which does not refresh) shows it until the next refresh, which
-  every acting tool does first.
+  event, so the daemon's state keeps it until the next refresh, which every acting tool does first.
 
 - **A refused join, and `irc_raw` allowed** (2026-10-23, daemon run with `--allow-raw`).
   - An agent EFnet connection (`cid 2662`, `` me2 ``) created `#mircd-test-da1b`, which made it
@@ -304,9 +301,9 @@ Proven by running it, with evidence in the log:
   - On williamgattone the same test failed to set up: that network does not give a channel's creator
     operator status, and the `MODE` came back as `482 You're not channel operator`, as a raw event
     on the right connection. So `irc_raw` sends, and the server's answer is seen.
-  - **`cid` on the per-connection tools.** `irc_join`, `irc_ensure_joined`, `irc_send`,
-    `irc_notice`, `irc_members`, `irc_ison` and `irc_raw` now take `cid`. With two connections on
-    one network the name alone is ambiguous, and this test was impossible without it.
+  - **`cid` on the per-connection tools.** `irc_join`, `irc_send`, `irc_members`, `irc_ison` and
+    `irc_raw` now take `cid`. With two connections on one network the name alone is ambiguous, and
+    this test was impossible without it.
   - **mIRC's auto-join applies to agent connections too.** The agent's EFnet connection was joined
     to `#home!` by the user's EFnet auto-join.
 - **Closing windows** (2026-10-23). mIRC's `/close -it` closes every status window that is neither
@@ -331,9 +328,9 @@ Proven by running it, with evidence in the log:
     `join_required` naming `#ARCHIVE-CHAT`, in 8 ms, with nothing sent to any bot.
   - Live, the whole loop (Rizon `#FILES`, on the user's connection). Its topic puts a colour
     code between `#` and the name (`^C10#^C0FILES-CHAT`), and stripping it finds `#FILES-CHAT`.
-    `xdcc_fetch` stopped at `join_required`. After `irc_ensure_joined #FILES-CHAT` (which the server
-    spelled `#files-chat`), the same call passed the topic check and stopped at
-    `bot_not_in_channel`. A made-up bot name was used, so nothing was requested.
+    `xdcc_fetch` stopped at `join_required`. After joining `#FILES-CHAT` (which the server spelled
+    `#files-chat`), the same call passed the topic check and stopped at `bot_not_in_channel`. A
+    made-up bot name was used, so nothing was requested.
 
 - **A slow connect no longer holds everything up** (2026-10-23). Commands run in lanes (see
   `src/core/commands.ts`). The ones `bridge.mrc` answers on the spot share one. Those answered only
@@ -381,13 +378,15 @@ Proven by running it, with evidence in the log:
   were given to an agent that had only the MCP tools, with no hints, and graded from
   `deno task report` (`scripts/session_report.ts`: every tool call, the `@bridge` lines, what was
   said under the user's nick, and guard refusals, for a time window).
-  - **A local model in `pi` never got a call through.** It found the tools by `pi`'s tool search but
-    could not call one, and looped; nothing reached the daemon. That is between the model and `pi`.
+  - **A local model in `pi`**, a much weaker model than Haiku. In `pi`'s default `codemod` mode it
+    never got a call through; in `direct` mode it does. Scenario 1 passes, including the empty
+    scrollback line (trap 18), confirmed live. Scenario 2 looped on joining the channel, which led
+    to merging the near-duplicate tools (see "The tools" above, and scenarios.md).
   - **Claude Haiku in Claude Code**, run from an empty folder so it could not read the source, took
-    two rounds. Findings and fixes are in scenarios.md. The largest was that Haiku picked
-    `irc_connect` over `irc_ensure_connected` and never checked state, which could have opened a
-    second connection to a network the user was on. The two tools are now one, which reuses by
-    network and closes a new connection again if it duplicates one.
+    three rounds to pass every scenario. Findings and fixes are in scenarios.md. The largest was
+    that Haiku picked `irc_connect` over `irc_ensure_connected` and never checked state, which could
+    have opened a second connection to a network the user was on. The two tools are now one, which
+    reuses by network and closes a new connection again if it duplicates one.
   - The others: `irc_read` names a channel that does not exist and says how far back it sees; the
     new `irc_history` reads mIRC's own scrollback (`$line`); `irc_disconnect` says the window stays
     and `irc_close_windows` closes it; `irc_history` says when its reply was capped; `xdcc_list`
@@ -416,9 +415,9 @@ on is protocol (`DCC SEND`, `DCC ACCEPT`, `FILERCVD`/`GETFAIL`, `$get` bytes), s
 depends on wording. Before the offer, bots speak in their operator's language. The classifier
 (`src/core/xdcc.ts`) acts only on what it recognises, and matches the bot's own words with quoted
 file names taken out (a release named `Access.Denied` once read as a refusal). Anything else is kept
-verbatim as `lastReply` with `lastReplyKind: "unknown"`, and `irc_dcc_watch` wakes on every new
-reply with `botSaid` and `readIt`. The agent reads it, in any language, tells the user, and closes a
-refused job with `xdcc_cancel {tellBot: false}`.
+verbatim as `lastReply` with `lastReplyKind: "unknown"`, and `irc_dcc_status {wait: true}` wakes on
+every new reply with `botSaid` and `readIt`. The agent reads it, in any language, tells the user,
+and closes a refused job with `xdcc_cancel {tellBot: false}`.
 
 Beyond those:
 
@@ -569,12 +568,11 @@ minimised **`@bridge`** window, not the active channel. Available while debuggin
 
 ## Next, in order
 
-0. **First, next session**: confirm trap 18's fix live. Reload `bridge.mrc` if mIRC has not, then
-   rerun scenario 1 in `pi` (direct mode) and check `irc_history` on `#home!` returns its empty
-   line as `""` rather than "could not be read". If it still breaks, the raw reply is in the log as
-   an `mbp.in` line just before the `mbp.bad-frame` warning. Then decide with the user whether to
-   push as is (private repo) or scrub the history first; nothing has been pushed since
-   `origin/main`.
+0. **Every scenario passing under `pi`** (direct mode, the local model). Haiku passes them all after
+   three rounds; `pi`'s model is much weaker, so it shows vague descriptions and unhelpful answers
+   that Haiku gets past. Scenario 1 passes. Next, rerun scenario 2 against the merged tools, then
+   the rest, and record each round in scenarios.md. Fix in the tool descriptions and answers, never
+   by hinting in the request.
 1. **Close the remaining live gaps when they happen**: a bot's queue, and a real stall. Neither can
    be found on demand. When the user reports one, read the log for that window: every bot reply, DCC
    event and 15 s progress poll is in it. A stall can also be staged: the user's mIRC sends itself

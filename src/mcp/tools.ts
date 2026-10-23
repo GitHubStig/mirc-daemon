@@ -274,6 +274,43 @@ function waitForJob(
 }
 
 /**
+ * `irc_dcc_status` with `wait`: wait for a job (the newest active one when
+ * none is named) to change, then report it.
+ */
+async function watchJob(s: Session, job?: string, timeoutMs?: number): Promise<ToolResult> {
+  const target = job !== undefined ? s.dcc.get(job) : s.dcc.active().at(-1);
+  if (!target) {
+    return job !== undefined
+      ? failure(bridgeError("dcc_failed", `no DCC job named "${job}".`))
+      : json({ changed: false, note: "no active DCC job to watch", jobs: s.dcc.list() });
+  }
+  const from = target.state;
+  const heard = target.lastReplyTs;
+  // A new reply wakes the watch even when it moves nothing: a refusal in a
+  // language the daemon cannot read must still reach the agent, which can.
+  const changed = await waitForJob(
+    s,
+    target,
+    (j) => j.state !== from || j.lastReplyTs !== heard,
+    timeoutMs ?? 50_000,
+  );
+  if (!changed && s.closed.aborted) return linkDropped();
+  const next = jobAdvice(target);
+  const newReply = target.lastReplyTs !== heard;
+  return json({
+    changed,
+    from,
+    ...(newReply ? { why: target.state !== from ? "state and reply" : "bot replied" } : {}),
+    job: target,
+    downloading: describeDownload(target) ?? null,
+    progress: describeProgress(target) ?? null,
+    ...(newReply ? botSaid(target) : {}),
+    ...(next ? { next } : {}),
+    ...(changed ? {} : { note: "no change yet; call again to keep waiting" }),
+  });
+}
+
+/**
  * The answer when a wait's mIRC link dropped under it. Events after a
  * reconnect go to a new session, so the wait could only have missed them;
  * the agent should ask again, which reaches the new session.
@@ -296,7 +333,7 @@ function linkDropped(): ToolResult {
 function jobAdvice(job: DccJob): string | undefined {
   switch (job.state) {
     case "downloading":
-      return "Transferring. Follow it with irc_dcc_watch; it ends complete or failed.";
+      return "Transferring. Follow it with irc_dcc_status {wait: true}; it ends complete or failed.";
     case "stalled":
       return "No data has arrived for a while, though mIRC still has the download open. Tell " +
         `the user. To retry, stop it with xdcc_cancel {job: "${job.id}"} and request the same ` +
@@ -324,7 +361,7 @@ function botSaid(job: DccJob): Record<string, unknown> {
       readIt: "The daemon did not recognise the bot's reply, so the job has not moved on it. " +
         "Read it yourself (it may be in another language) and tell the user what it means. If " +
         `it is a refusal, close the job with xdcc_cancel {job: "${job.id}", tellBot: false}. ` +
-        "If it says the transfer is coming, follow it with irc_dcc_watch.",
+        "If it says the transfer is coming, follow it with irc_dcc_status {wait: true}.",
     }),
   };
 }
@@ -377,7 +414,7 @@ const sessionArg = z
   .optional()
   .describe(
     "Leave this out. Only needed when several mIRC clients are attached, which is rare; then " +
-      'it is a client id like "s1" from irc_list_sessions. Not a connection: that is cid.',
+      'it is a client id like "s1" from daemon_status. Not a connection: that is cid.',
   );
 const networkArg = z
   .string()
@@ -456,12 +493,6 @@ const joinSchema = z.object({
   cid: cidArg,
   channel: z.string(),
   key: z.string().optional(),
-});
-const ensureJoinedSchema = z.object({
-  session: sessionArg,
-  network: networkArg,
-  cid: cidArg,
-  channel: z.string(),
 });
 /**
  * The agent's word that the user asked for this. Leaving or changing anything
@@ -552,6 +583,10 @@ const sendSchema = z.object({
   cid: cidArg,
   target: z.string(),
   text: z.string().min(1),
+  notice: z
+    .boolean()
+    .optional()
+    .describe("Send it as a NOTICE instead. Some bots take commands only that way."),
 });
 const notifySchema = z.object({ session: sessionArg, text: z.string().min(1) });
 const waitSchema = z.object({
@@ -572,7 +607,15 @@ const jobArg = z
   .string()
   .optional()
   .describe("A job id from xdcc_fetch, e.g. dcc3. Omit for the most recent active one.");
-const dccStatusSchema = z.object({ session: sessionArg, job: jobArg });
+const dccStatusSchema = z.object({
+  session: sessionArg,
+  job: jobArg,
+  wait: z
+    .boolean()
+    .optional()
+    .describe("Wait for the job to change before answering, instead of answering now."),
+  timeoutMs: z.int().min(100).max(MAX_WAIT_MS).optional().describe("With wait: how long."),
+});
 const xdccCancelSchema = z.object({
   session: sessionArg,
   job: jobArg,
@@ -584,11 +627,6 @@ const xdccCancelSchema = z.object({
       "Send the bot XDCC CANCEL / XDCC REMOVE (default true). Pass false to just close the " +
         "job, e.g. when the bot already refused in words the daemon did not recognise.",
     ),
-});
-const dccWatchSchema = z.object({
-  session: sessionArg,
-  job: jobArg,
-  timeoutMs: z.int().min(100).max(MAX_WAIT_MS).optional(),
 });
 const xdccListSchema = z.object({
   session: sessionArg,
@@ -673,7 +711,6 @@ type MembersArgs = z.infer<typeof membersSchema>;
 type IsonArgs = z.infer<typeof isonSchema>;
 type ConnectArgs = z.infer<typeof connectSchema>;
 type JoinArgs = z.infer<typeof joinSchema>;
-type EnsureJoinedArgs = z.infer<typeof ensureJoinedSchema>;
 type PartArgs = z.infer<typeof partSchema>;
 type DisconnectArgs = z.infer<typeof disconnectSchema>;
 type CloseWindowsArgs = z.infer<typeof closeWindowsSchema>;
@@ -685,7 +722,6 @@ type SendArgs = z.infer<typeof sendSchema>;
 type NotifyArgs = z.infer<typeof notifySchema>;
 type WaitArgs = z.infer<typeof waitSchema>;
 type DccStatusArgs = z.infer<typeof dccStatusSchema>;
-type DccWatchArgs = z.infer<typeof dccWatchSchema>;
 type XdccListArgs = z.infer<typeof xdccListSchema>;
 type XdccFetchArgs = z.infer<typeof xdccFetchSchema>;
 type XdccCancelArgs = z.infer<typeof xdccCancelSchema>;
@@ -749,7 +785,8 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     "daemon_status",
     {
       description:
-        "Daemon health: uptime, whether mIRC is attached and answering, session id and active " +
+        "Daemon health: uptime, whether mIRC is attached and answering, session id (every " +
+        "attached mIRC client, when there are several) and active " +
         "DCC jobs.",
       inputSchema: emptySchema.shape,
     },
@@ -770,31 +807,17 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           agentsAttached: 0,
           lastStateRefreshTs: sole?.state.lastRefreshTs,
           dccJobs: sessions.reduce((total, s) => total + s.dcc.active().length, 0),
+          ...(sessions.length > 1
+            ? {
+              clients: sessions.map((s) => ({
+                ...s.info(),
+                networks: s.state.networks().map((n) => n.name),
+              })),
+            }
+            : {}),
         };
         return json(status);
       }),
-  );
-
-  tool(
-    "irc_list_sessions",
-    {
-      description: "List attached mIRC clients with a summary of the networks each is on.",
-      inputSchema: emptySchema.shape,
-    },
-    (_args: EmptyArgs) =>
-      guarded(() =>
-        json(
-          registry.list().map((s) => ({
-            ...s.info(),
-            networks: s.state.networks().map((n) => ({
-              name: n.name,
-              status: n.status,
-              nick: n.nick,
-              channels: n.channels,
-            })),
-          })),
-        )
-      ),
   );
 
   tool(
@@ -1155,14 +1178,18 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     "irc_join",
     {
       description:
-        "Join a channel. A channel with almost nobody in it comes back with a warning, since " +
-        "an empty channel often means the name is wrong.",
+        "Make sure mIRC is in a channel, joining only if it is not already there. Returns the " +
+        "channel's topic: read it, since channels state their rules there. Not needed before " +
+        "xdcc_fetch or xdcc_search, which join by themselves. A channel with almost nobody " +
+        "in it comes back with a warning, since that often means the name is wrong.",
       inputSchema: joinSchema.shape,
     },
     ({ session, network, cid, channel, key }: JoinArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
         const net = await targetOf(s, network, stateFreshnessMs, cid);
+        // Asked of mIRC even when already joined: it answers that from its own
+        // records at once, with the topic, and sends nothing to the server.
         const outcome = await s.commands.send("join", { cid: net.cid, channel, key }, {
           context: "join",
         });
@@ -1170,61 +1197,35 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           s.note(`could not join ${channel} on ${net.name}: ${outcome.error.hint}`);
           return failure(explainJoinRefusal(outcome.error, net));
         }
+        const already = outcome.data?.already === true;
         // Only a real join earns a receipt: "already" means it was in there before.
-        if (outcome.data?.already !== true) {
+        if (!already) {
           s.owned.joinedChannel(net.cid, channel);
           s.note(`joined ${channel} on ${net.name}`);
         }
-
+        const spelled = typeof outcome.data?.joined === "string" ? outcome.data.joined : channel;
         const members = typeof outcome.data?.members === "number"
           ? outcome.data.members
           : s.state.memberCount(net, channel);
+        const topic = typeof outcome.data?.topic === "string" && outcome.data.topic !== ""
+          ? outcome.data.topic
+          : null;
         const warning = emptyChannelWarning(channel, members);
-        return fromOutcome(outcome, warning ? [warning] : []);
-      }),
-  );
-
-  tool(
-    "irc_ensure_joined",
-    {
-      description:
-        "Make sure mIRC is in a channel, joining only if it is not already. Returns the " +
-        "channel's topic: read it, since channels state their rules there. This is the step " +
-        "to use before messaging a bot.",
-      inputSchema: ensureJoinedSchema.shape,
-    },
-    ({ session, network, cid, channel }: EnsureJoinedArgs) =>
-      guarded(async () => {
-        const s = sessionOf(registry, session);
-        const net = await targetOf(s, network, stateFreshnessMs, cid);
-        // Asked of mIRC even when already joined: it answers that from its own
-        // records at once, with the topic, and sends nothing to the server.
-        const outcome = await s.commands.send("join", { cid: net.cid, channel }, {
-          context: "join",
-        });
-        if (!outcome.ok) {
-          s.note(`could not join ${channel} on ${net.name}: ${outcome.error.hint}`);
-          return failure(explainJoinRefusal(outcome.error, net));
-        }
-        if (outcome.data?.already === true) {
-          return json({
-            skipped: true,
-            reason: "already joined",
-            channel,
-            members: outcome.data.members ?? s.state.memberCount(net, channel),
-            topic: outcome.data.topic ?? null,
-          });
-        }
-        s.owned.joinedChannel(net.cid, channel);
-        s.note(`joined ${channel} on ${net.name}`);
-        const members = typeof outcome.data?.members === "number"
-          ? outcome.data.members
-          : s.state.memberCount(net, channel);
-        const warning = emptyChannelWarning(channel, members);
+        // Said in words, both ways. Seen with a small local model: handed back
+        // only `skipped: true`, it called the same join again and again.
+        const done = (already
+          ? `mIRC was already in ${spelled} on ${net.name}; nothing was sent. Do not join it ` +
+            "again: carry on with the task."
+          : `Joined ${spelled} on ${net.name}.`) +
+          (topic ? " Read the topic for the channel's rules." : "");
         return json({
-          skipped: false,
-          channel,
-          data: outcome.data ?? {},
+          ok: true,
+          done,
+          already,
+          channel: spelled,
+          network: net.name,
+          members,
+          topic,
           warnings: warning ? [warning] : [],
         });
       }),
@@ -1542,19 +1543,27 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     "irc_send",
     {
       description:
-        "Send a PRIVMSG. `target` may be a channel (#name) or a nick, so this covers both " +
-        "talking in a channel and messaging a bot. Success means mIRC sent it; IRC does not " +
-        "acknowledge delivery, so a refusal (e.g. 401 no such nick) arrives later as a raw event.",
+        "Send a message (PRIVMSG), or a NOTICE with notice: true. `target` may be a channel " +
+        "(#name) or a nick, so this covers both talking in a channel and messaging a bot. " +
+        "Success means mIRC sent it; IRC does not acknowledge delivery, so a refusal (e.g. " +
+        "401 no such nick) arrives later as a raw event.",
       inputSchema: sendSchema.shape,
     },
-    ({ session, network, cid, target, text }: SendArgs) =>
+    ({ session, network, cid, target, text, notice }: SendArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
         const net = await targetOf(s, network, stateFreshnessMs, cid);
-        const outcome = await s.commands.send("msg", { cid: net.cid, target, text }, {
+        const action = notice === true ? "notice" : "msg";
+        const outcome = await s.commands.send(action, { cid: net.cid, target, text }, {
           context: "message",
         });
-        if (outcome.ok) s.note(`said to ${target} on ${net.name}: ${text}`);
+        if (outcome.ok) {
+          s.note(
+            notice === true
+              ? `sent a notice to ${target} on ${net.name}: ${text}`
+              : `said to ${target} on ${net.name}: ${text}`,
+          );
+        }
         // A bot command typed into a channel. Seen with a real agent: it sent
         // "!search debian" this way, then waited in the channel, while the
         // results came privately, as notices from the search bot.
@@ -1572,24 +1581,6 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
             ]
             : [],
         );
-      }),
-  );
-
-  tool(
-    "irc_notice",
-    {
-      description: "Send a NOTICE. Many IRC bots accept commands this way rather than by PRIVMSG.",
-      inputSchema: sendSchema.shape,
-    },
-    ({ session, network, cid, target, text }: SendArgs) =>
-      guarded(async () => {
-        const s = sessionOf(registry, session);
-        const net = await targetOf(s, network, stateFreshnessMs, cid);
-        const outcome = await s.commands.send("notice", { cid: net.cid, target, text }, {
-          context: "message",
-        });
-        if (outcome.ok) s.note(`sent a notice to ${target} on ${net.name}: ${text}`);
-        return fromOutcome(outcome);
       }),
   );
 
@@ -1648,12 +1639,15 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         "XDCC/DCC jobs: requested, queued (with position), offered, downloading (with bytes " +
         "and rate), stalled, complete, refused or failed, with the bot's last reply. Pass " +
         "`job` for one. Jobs keep updating in the background, so this is how to check on a " +
-        "slow bot or a long transfer.",
+        "slow bot or a long transfer. With wait: true it waits (at most 55 s) until the job " +
+        "changes or the bot says something, then reports it; call again to keep waiting, " +
+        "since transfers and busy bots can take far longer than one call may wait.",
       inputSchema: dccStatusSchema.shape,
     },
-    ({ session, job }: DccStatusArgs) =>
+    ({ session, job, wait, timeoutMs }: DccStatusArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
+        if (wait === true) return await watchJob(s, job, timeoutMs);
         // Fresh numbers rather than up to one poll interval old.
         await s.pollTransfers();
         if (job !== undefined) {
@@ -1673,51 +1667,6 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           jobs: s.dcc.list(),
           active: s.dcc.active().length,
           mircAccepts: s.sreq ?? null,
-        });
-      }),
-  );
-
-  tool(
-    "irc_dcc_watch",
-    {
-      description:
-        "Wait until a DCC job changes state (queued, offered, downloading, stalled, complete, " +
-        "refused, failed), at most 55 s, then report it with its progress. Call again to keep " +
-        "waiting: transfers and busy bots can take far longer than one call may wait.",
-      inputSchema: dccWatchSchema.shape,
-    },
-    ({ session, job, timeoutMs }: DccWatchArgs) =>
-      guarded(async () => {
-        const s = sessionOf(registry, session);
-        const target = job !== undefined ? s.dcc.get(job) : s.dcc.active().at(-1);
-        if (!target) {
-          return job !== undefined
-            ? failure(bridgeError("dcc_failed", `no DCC job named "${job}".`))
-            : json({ changed: false, note: "no active DCC job to watch", jobs: s.dcc.list() });
-        }
-        const from = target.state;
-        const heard = target.lastReplyTs;
-        // A new reply wakes the watch even when it moves nothing: a refusal in a
-        // language the daemon cannot read must still reach the agent, which can.
-        const changed = await waitForJob(
-          s,
-          target,
-          (j) => j.state !== from || j.lastReplyTs !== heard,
-          timeoutMs ?? 50_000,
-        );
-        if (!changed && s.closed.aborted) return linkDropped();
-        const next = jobAdvice(target);
-        const newReply = target.lastReplyTs !== heard;
-        return json({
-          changed,
-          from,
-          ...(newReply ? { why: target.state !== from ? "state and reply" : "bot replied" } : {}),
-          job: target,
-          downloading: describeDownload(target) ?? null,
-          progress: describeProgress(target) ?? null,
-          ...(newReply ? botSaid(target) : {}),
-          ...(next ? { next } : {}),
-          ...(changed ? {} : { note: "no change yet; call again to keep waiting" }),
         });
       }),
   );
@@ -2087,13 +2036,13 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     "xdcc_fetch",
     {
       description:
-        "Request a pack from an XDCC bot: ensures mIRC is on the network and in the channel, " +
-        "checks the channel's topic (if it names other channels mIRC is not in, nothing is " +
-        "requested until they are joined: join_required), confirms the bot is present, sends " +
-        "the request, then waits (up to ~50 s) for the bot " +
-        "to answer. Returns a job: queued (with position), offered (transfer starting), " +
+        "Request a pack from an XDCC bot. mIRC must be on the network (irc_connect); that is " +
+        "the only step needed first, since this joins the channel itself. It checks the " +
+        "channel's topic (if it names other channels mIRC is not in, nothing is requested " +
+        "until they are joined: join_required), confirms the bot is present, sends the " +
+        "request, then waits (up to ~50 s) for the bot to answer. Returns a job: queued (with position), offered (transfer starting), " +
         "refused (with the bot's reason), or still waiting. The job keeps updating afterwards; " +
-        "follow it with irc_dcc_watch or irc_dcc_status.",
+        "follow it with irc_dcc_status {wait: true}.",
       inputSchema: xdccFetchSchema.shape,
     },
     (
@@ -2144,7 +2093,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
             ...(downloading ? { downloading } : {}),
             progress: describeProgress(existing) ?? null,
             next: jobAdvice(existing) ??
-              "Nothing was sent to the bot. Follow the existing job with irc_dcc_watch.",
+              "Nothing was sent to the bot. Follow the existing job with irc_dcc_status {wait: true}.",
           });
         }
 
@@ -2179,7 +2128,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
               `nothing was requested yet. ${channel}'s topic names ` +
                 `${missing.join(", ")}, which mIRC is not in. Many XDCC channels ban anyone ` +
                 "who downloads without joining the channels their topic names. Read the topic: " +
-                `"${plainText(topic)}". If it asks for that, join each with irc_ensure_joined ` +
+                `"${plainText(topic)}". If it asks for that, join each with irc_join ` +
                 "(no need to ask the user, but tell them which channels you joined and why), " +
                 "then call xdcc_fetch again. If a channel is only mentioned (a help channel, an " +
                 "announcement), call again with topicRead: true.",
@@ -2279,19 +2228,19 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           : job.state === "offered"
           ? `The transfer is starting${
             job.resumedFrom !== undefined ? " as a resume of the file mIRC already has" : ""
-          }: ${acceptance(s)} Follow it with irc_dcc_watch.`
+          }: ${acceptance(s)} Follow it with irc_dcc_status {wait: true}.`
           : job.state === "complete"
           ? "The transfer has already finished."
           : job.state === "failed"
           ? "The transfer failed at once; see detail. Asking again resumes from what is saved."
           : job.state === "queued"
           ? `Queued${job.position ? ` at position ${job.position}` : ""}: the bot will send ` +
-            "when your turn comes, which can take a long time. Follow it with irc_dcc_watch."
+            "when your turn comes, which can take a long time. Follow it with irc_dcc_status {wait: true}."
           : job.lastReply
           ? "The bot answered but has not offered the file yet; see botSaid. The job keeps " +
             "listening."
           : `No answer from ${bot} yet. Busy bots can take minutes; the job keeps listening, ` +
-            "so check back with irc_dcc_watch rather than asking again.";
+            "so check back with irc_dcc_status {wait: true} rather than asking again.";
         const downloading = describeDownload(job);
         return json({
           ...(downloading

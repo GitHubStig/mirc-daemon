@@ -34,7 +34,9 @@ tool that waits longer does not wait longer: it fails client-side, and the answe
   call is waiting: _requested → (queued) → offered → complete_, or it ends _refused_ or _failed_.
 - No tool waits longer than 55 s. `xdcc_fetch` waits about 50 s for the bot's first answer and
   returns the job whatever its state. "No answer yet" is a state, not an error. The agent follows up
-  with `irc_dcc_watch`, which waits for the job to _change_, or with `irc_dcc_status`.
+  with `irc_dcc_status {wait: true}`, which waits for the job to _change_, or with plain
+  `irc_dcc_status` for where it stands now. (These were two tools, `irc_dcc_watch` and
+  `irc_dcc_status`, until 2026-10-23.)
 
 **There is a pre-transfer signal after all.** The bot's offer, `DCC SEND <file> <ip> <port> <size>`,
 is a CTCP, and `bridge.mrc` already mirrors CTCPs. It moves the job to _offered_, with the file name

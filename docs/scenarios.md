@@ -32,10 +32,10 @@ network the user is on: nothing here should open a second.
 > Get pack 39 from VoLtAgE|SoFT-LiNUX|04 in #HIGH-VOLTAGE on irc.williamgattone.it. It needs TLS.
 
 - **Good**: `irc_connect` (server, TLS, ideally network williamgattone), then `xdcc_fetch`. It tells
-  you the file name and size from `downloading`, and follows with `irc_dcc_watch` or
-  `irc_dcc_status`. If the ISO is already complete on disk, it says you already have it.
-- **Wrong**: `xdcc_fetch` twice for the same pack; disconnecting when done (nobody asked); a second
-  connection to the network.
+  you the file name and size from `downloading`, and follows with `irc_dcc_status` (with
+  `wait: true` while it runs). If the ISO is already complete on disk, it says you already have it.
+- **Wrong**: `xdcc_fetch` twice for the same pack; the same call over and over; disconnecting when
+  done (nobody asked); a second connection to the network.
 
 ## 3. A topic that names another channel
 
@@ -46,8 +46,8 @@ reach a real request. It stops at "bot not in channel".
 > Get pack 1 from NoSuchBot-test in #FILES on Rizon.
 
 - **Good**: `xdcc_fetch` returns `join_required` naming #FILES-CHAT. The agent joins it
-  (`irc_ensure_joined`), tells you it did and why, calls `xdcc_fetch` again, and reports the bot is
-  not there.
+  (`irc_join`), tells you it did and why, calls `xdcc_fetch` again, and reports the bot is not
+  there.
 - **Wrong**: `topicRead: true` to skip it; asking for the pack another way (`irc_send` with
   `xdcc send`); not telling you about the extra channel.
 
@@ -164,3 +164,21 @@ tools; the local model hallucinated calls and looped, and nothing reached the da
   connection's `cid` as `session` ("1"), and the error said to "pass session", which it had; it went
   round in circles until it guessed "s1". Fixed: an unknown session says it does not exist and to
   leave session out, and the argument's description says the same, and that a session is not a cid.
+- **Scenario 2, known pack**: stopped by the user. `irc_connect` with TLS was right, and the join
+  worked, but the model then called `irc_ensure_joined #HIGH-VOLTAGE` over and over and never
+  reached `xdcc_fetch`. Its thinking went back and forth between the two, and it made up names
+  (`irc_ensure_join`, `irc_fetch`). Three things pulled it there:
+  - `irc_ensure_joined` called itself "the step to use before messaging a bot";
+  - an "already joined" answer said only `skipped: true`, with nothing on what to do next;
+  - near-duplicate tools: `irc_join` and `irc_ensure_joined` sent mIRC the same command.
+
+  Fixed:
+  - `irc_join` and `irc_ensure_joined` are now one `irc_join`, which joins only when needed, takes a
+    key, and always returns the topic. Its answer says in words what happened (`done`), and for a
+    channel already joined, not to join it again.
+  - `xdcc_fetch`'s description says connecting is the only step needed first.
+  - The same pass merged `irc_notice` into `irc_send` (`notice: true`) and `irc_dcc_watch` into
+    `irc_dcc_status` (`wait: true`), and dropped `irc_list_sessions`: `daemon_status` lists the
+    clients when there are several.
+  - `xdcc_search` and `xdcc_search_results` stay separate: a model that loses the cursor would
+    search again, visibly, under the user's nick.

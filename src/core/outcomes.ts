@@ -136,7 +136,7 @@ export function classifyNumeric(
 const ERR_TOKENS: Record<string, { code: ErrorCode; hint: string }> = {
   "not-on-channel": {
     code: "not_on_channel",
-    hint: "mIRC is not in that channel. Join it first, or use irc_ensure_joined.",
+    hint: "mIRC is not in that channel. Join it first with irc_join.",
   },
   "join-timeout": {
     code: "join_timeout",
