@@ -39,6 +39,8 @@ Deno.test("resolve reports an unknown network with the list of real ones", () =>
   assertEquals(err.error.code, "unknown_network");
   assertEquals(err.error.hint.includes("net1"), true);
   assertEquals(err.error.hint.includes("net2"), true);
+  // The next step, not just the fact: a small model gave up on the fact alone.
+  assertEquals(err.error.hint.includes('irc_connect {network: "nope"}'), true);
 });
 
 Deno.test("resolve explains an empty daemon rather than pretending a network exists", () => {

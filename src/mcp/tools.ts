@@ -62,6 +62,8 @@ export interface ToolOptions {
   allowRaw: boolean;
   /** How long a connect is waited for; tests shorten it. */
   connectWaitMs?: number;
+  /** The pause between joining and searching; tests shorten it. */
+  searchSettleMs?: number;
 }
 
 interface ToolResult {
@@ -240,6 +242,26 @@ const OFFER_GRACE_MS = 5_000;
 
 /** How long a connect is waited for before reporting that mIRC is still trying. */
 const CONNECT_WAIT_MS = 50_000;
+
+/**
+ * How long xdcc_search waits after joining a channel before it searches. Seen
+ * live (Rizon, 2026-10-23): searching 40 ms after the join got no answer, and a
+ * greeting the channel's bot sends on join was taken for one. Some bots also
+ * ignore commands from someone who has only just joined. Taken out of the
+ * search's own wait, so the call still ends inside the client's ~60 s.
+ */
+const SEARCH_SETTLE_MS = 10_000;
+
+/** Network services: their notices (a rename warning, logon news) are never a search's answer. */
+const SERVICES = new Set([
+  "nickserv",
+  "chanserv",
+  "memoserv",
+  "operserv",
+  "hostserv",
+  "botserv",
+  "global",
+]);
 
 /** How long xdcc_fetch waits after the offer for a resume's ACCEPT (and its end). */
 const RESUME_GRACE_MS = 2_500;
@@ -731,6 +753,7 @@ type RawArgs = z.infer<typeof rawSchema>;
 export function registerTools(server: McpServer, options: ToolOptions): void {
   const { registry, stateFreshnessMs, allowRaw } = options;
   const connectWaitMs = options.connectWaitMs ?? CONNECT_WAIT_MS;
+  const searchSettleMs = options.searchSettleMs ?? SEARCH_SETTLE_MS;
 
   /**
    * Register one tool, logging every invocation.
@@ -1968,6 +1991,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
       cid,
       test: (e) =>
         (e.kind === "notice" || e.kind === "text") &&
+        !SERVICES.has((e.nick ?? "").toLowerCase()) &&
         (!isChannelBuffer(e.buf) ||
           ((e.buf ?? "").toLowerCase() === channel.toLowerCase() &&
             parseSearchResult(e.text ?? "") !== undefined)),
@@ -2169,6 +2193,15 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           );
         }
 
+        // Just joined: let the channel settle first. What arrives meanwhile
+        // (greetings sent on join) falls before the cursor, so it is not
+        // mistaken for the answer.
+        const settle = joined.data?.already === true ? 0 : searchSettleMs;
+        if (settle > 0) {
+          await new Promise((resolve) => setTimeout(resolve, settle));
+          if (s.closed.aborted) return linkDropped();
+        }
+
         const cursor = s.log.cursor;
         const said = command + " " + query;
         const sent = await s.commands.send(
@@ -2184,7 +2217,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           net.cid,
           channel,
           cursor,
-          timeoutMs ?? 50_000,
+          Math.max(1000, (timeoutMs ?? 50_000) - settle),
           quietMs ?? 3000,
         );
         if (!collected) return linkDropped();

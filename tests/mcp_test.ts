@@ -39,7 +39,12 @@ interface Stack {
  * closest thing to the real deployment that runs without mIRC present.
  */
 async function stack(
-  options: { allowRaw?: boolean; log?: LogSink; connectWaitMs?: number } = {},
+  options: {
+    allowRaw?: boolean;
+    log?: LogSink;
+    connectWaitMs?: number;
+    searchSettleMs?: number;
+  } = {},
 ): Promise<Stack> {
   const mirc = startMircListener({
     hostname: "127.0.0.1",
@@ -64,6 +69,8 @@ async function stack(
     stateFreshnessMs: 5000,
     allowRaw: options.allowRaw ?? false,
     connectWaitMs: options.connectWaitMs,
+    // Searches join fresh channels in most tests: no 10 s pause before each.
+    searchSettleMs: options.searchSettleMs ?? 0,
   });
 
   const http = startHttpServer({
@@ -1984,6 +1991,66 @@ Deno.test("xdcc_fetch never leaves a channel mIRC was already in", async () => {
 });
 
 // --- searching -----------------------------------------------------------------------
+
+Deno.test("xdcc_search waits after a fresh join, so a join greeting is not the answer", async () => {
+  // Live: the channel bot's greeting landed 34 ms before the search and was taken
+  // for its answer; the real search bot never replied.
+  const s = await stack({ searchSettleMs: 300 });
+  try {
+    let joinedAt = 0;
+    s.fake.setHandler((cmd, fake) => {
+      if (cmd.action === "join") {
+        joinedAt = Date.now();
+        setTimeout(
+          () => fake.emit("notice", { buf: "[XB]", nick: "[XB]", text: "[#chat] join #x" }),
+          50,
+        );
+        return { ok: true, data: { joined: "#chat", members: 600, topic: "Triggers: !search" } };
+      }
+      if (cmd.action === "msg") {
+        assertEquals(Date.now() - joinedAt >= 300, true, "searched before the pause ended");
+        setTimeout(() => fake.emit("notice", { buf: "Finder", nick: "Finder", text: "none" }), 20);
+      }
+      return undefined;
+    });
+    const body = JSON.parse(textOf(
+      await s.client.callTool({
+        name: "xdcc_search",
+        arguments: { channel: "#chat", query: "q", quietMs: 200 },
+      }),
+    ));
+    assertEquals(body.said, ["Finder: none"]);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("xdcc_search never takes a services notice for the answer", async () => {
+  const s = await stack();
+  try {
+    s.fake.setHandler((cmd, fake) => {
+      if (cmd.action === "join") {
+        return { ok: true, data: { joined: "#chat", members: 600, topic: "Triggers: !search" } };
+      }
+      if (cmd.action === "msg") {
+        setTimeout(
+          () => fake.emit("notice", { buf: "NickServ", nick: "NickServ", text: "Guest4321" }),
+          20,
+        );
+      }
+      return undefined;
+    });
+    const body = JSON.parse(textOf(
+      await s.client.callTool({
+        name: "xdcc_search",
+        arguments: { channel: "#chat", query: "q", timeoutMs: 1000, quietMs: 200 },
+      }),
+    ));
+    assertEquals(body.pending, true);
+  } finally {
+    await s.stop();
+  }
+});
 
 Deno.test("xdcc_search takes the trigger from the topic and returns the results", async () => {
   const s = await stack();

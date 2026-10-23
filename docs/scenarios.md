@@ -231,3 +231,30 @@ Scenarios 1 to 5 in one `pi` session (Gemma 4 12B, Q4, on Ollama, thinking off),
     joined is left again, and the answer names the network it looked on, the networks mIRC is on,
     and says to `irc_connect {network}` first if the user named another.
   - `irc_connect {network: "Rizon"}` now works with no server, from mIRC's own server list.
+
+### `pi` round 4, 2026-10-23: scenario 4 again, a fresh session
+
+- **Search**: failed, but got further. It passed `network: "Rizon"` this time. With mIRC only on
+  EFnet, the answer was `unknown_network: no network named "Rizon". mIRC has: EFNet`, which states
+  the fact but not the step, and the model gave up and asked the user. Fixed: a network mIRC is not
+  on now answers "mIRC is not on Rizon yet. Connect first with `irc_connect {network: "Rizon"}`,
+  then call this again with the same network", for every tool that takes a network.
+
+### `pi` round 5, 2026-10-23: scenarios 4, 3 and 5 in one session
+
+1. **Search (4)**: the agent's part passed. `irc_connect {network: "Rizon"}` by name (the new
+   `unknown_network` wording worked), then `xdcc_search` with `network`. But the search reported
+   "nothing turned up" after 4 s: the only "reply" was the channel bot's greeting on join
+   (`[#files-chat] Have something to offer? ...`), which arrived 34 ms before the search was even
+   sent and was still taken for its answer. The search bot never answered. The search went out 40 ms
+   after the join, and some bots ignore commands from someone who has only just joined. Fixed:
+   - after a fresh join, `xdcc_search` waits 10 s before it searches, and listens only from then on;
+     the pause comes out of its ~50 s wait, so the call still ends in time;
+   - notices from network services (NickServ, Global, ...) never count as a search's answer: on
+     Rizon, NickServ's rename warning lands during every first search.
+
+   Whether the 10 s pause is what this bot needs is not yet known: rerun it.
+2. **Topic (3)**: passed. #FILES-CHAT was already joined from 4, so the topic check passed; the bot
+   was not there, `#FILES` was left again, and the agent said so.
+3. **Clean up (5)**: passed. One `irc_cleanup` call disconnected the agent's Rizon connection and
+   closed its window; EFnet and `#home!` untouched.

@@ -158,12 +158,16 @@ export class StateModel {
       const matches = this.networks().filter((n) => sameNetwork(n.name, name));
       if (matches.length === 1) return matches[0];
       if (matches.length === 0) {
+        // Said as the next step. Seen with a small local model: told only "no
+        // network named Rizon" with the one it was on, it gave up and asked the
+        // user, when connecting was all that was missing.
         throw new BridgeFailure(
           bridgeError(
             "unknown_network",
-            this.#connections.size === 0
-              ? `mIRC is not connected to any network, so "${name}" does not exist.`
-              : `no network named "${name}". mIRC has: ${describe(this.networks())}.`,
+            `mIRC is not on "${name}" yet` +
+              (this.#connections.size === 0 ? "" : ` (it is on ${describe(this.networks())})`) +
+              `. Connect first with irc_connect {network: "${name}"}, then call this again ` +
+              "with the same network.",
           ),
         );
       }
