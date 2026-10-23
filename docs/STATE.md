@@ -39,8 +39,7 @@ lines), this file, then `docs/adr/` (0010 and 0012 cover most recent work).
   edits.
 - **Request the pack straight away, then tell the user what is coming.** Users go straight to
   `xdcc send`, never `xdcc info`, so the agent does too. As soon as the bot's offer names the file
-  and size, tell the user, and cancel with `xdcc_cancel` if it is not what they wanted. Never
-  knowingly fetch pirated material: if an offer's name shows that is what it is, cancel it.
+  and size, tell the user, and cancel with `xdcc_cancel` if it is not what they wanted.
   Self-send (below) also tests DCC with no bot.
 - **Nothing sent to IRC may mark the traffic as automated.** No agent nick, and mIRC's own default
   quit message unless the user gives one.
