@@ -145,8 +145,27 @@ alias -l jnum {
 
 ; --- connection -----------------------------------------------------------
 
+; mIRC buffers at most 16384 bytes per socket, and every /sockwrite past that
+; fails with an error in the status window. Seen live (2026-10-23): joining a
+; big XDCC channel on Abjects flooded the queue with its member list and spammed
+; "queue would exceed 16384 bytes". So events back off while the queue is nearly
+; full: they are dropped and counted, and the count goes to the daemon once
+; there is room, so the gap is reported rather than silent. Replies (res) are
+; always sent: a lost reply is a command that times out. A frame is an event if
+; it starts {"t":"ev" -- characters 7-8 are "ev" (and "re" for a reply).
 alias -l bridge_send {
   if (!$sock(bridge)) return
+  if ($mid($1-, 7, 2) == ev) {
+    if ($sock(bridge).sq > 12000) {
+      set -e %bridge_dropped $calc(%bridge_dropped + 1)
+      return
+    }
+    if (%bridge_dropped > 0) {
+      var %n = %bridge_dropped
+      unset %bridge_dropped
+      sockwrite -n bridge $chr(123) $+ $kvo(t, $jstr(ev)) $+ $chr(44) $+ $kvo(kind, $jstr(dropped)) $+ $chr(44) $+ $kvo(net, $chr(34) $+ $chr(34)) $+ $chr(44) $+ $kvo(extra, $chr(123) $+ $kvo(count, %n) $+ $chr(125)) $+ $chr(125)
+    }
+  }
   sockwrite -n bridge $1-
 }
 
@@ -443,11 +462,17 @@ alias bridge_ison_timeout {
 
 ; --- join / part ----------------------------------------------------------
 
+; "topic":"..." for a join reply. Channels state their rules in the topic, and
+; some XDCC channels ban anyone who downloads without joining the other channels
+; it names, so the daemon reads it before requesting anything. Capped at 400
+; characters: IRC allows about 390, and jstr can grow a coloured one a lot.
+alias -l bridge_topickv { return $kvo(topic, $jstr($left($chan($1).topic, 400))) }
+
 alias -l bridge_do_join {
   ; Joining a channel we are already in makes the server say nothing at all, so
   ; this used to sit until the daemon timed out.
   if ($me ison $2) {
-    bridge_ok $1 $kvo(joined, $jstr($2)) $+ $chr(44) $+ $kvo(members, $nick($2, 0)) $+ $chr(44) $+ $kvo(already, true)
+    bridge_ok $1 $kvo(joined, $jstr($2)) $+ $chr(44) $+ $kvo(members, $nick($2, 0)) $+ $chr(44) $+ $kvo(already, true) $+ $chr(44) $+ $bridge_topickv($2)
     return
   }
   set -e %bridge_join_id $1
@@ -756,7 +781,7 @@ raw 366:*:{
     var %id = %bridge_join_id
     .timerbridgejoin off
     unset %bridge_join_id %bridge_join_chan %bridge_join_cid
-    bridge_ok %id $kvo(joined, $jstr($2)) $+ $chr(44) $+ $kvo(members, $nick($2, 0))
+    bridge_ok %id $kvo(joined, $jstr($2)) $+ $chr(44) $+ $kvo(members, $nick($2, 0)) $+ $chr(44) $+ $bridge_topickv($2)
   }
 }
 
@@ -816,6 +841,11 @@ raw *:*: { bridge_mirror_raw $numeric $1- }
 alias -l bridge_mirror_raw {
   if (!$sock(bridge)) return
   if ($len($1-) > 3000) return
+  ; Bulk replies come hundreds of lines at a time and nothing in the daemon reads
+  ; them: 353 (member list, sent on every join, and the flood that overran the
+  ; send queue on a big channel), 352 (WHO), 322 (LIST), 367 (ban list). Member
+  ; counts come from $nick(#, 0) instead.
+  if ($istok(353 352 322 367, $1, 32)) return
   bridge_send $evp(raw) $+ $chr(44) $+ $kvo(raw, $jstr($1-)) $+ $chr(44) $+ $kvo(extra, $chr(123) $+ $kvo(numeric, $iif($1 isnum, $1, 0)) $+ $chr(125)) $+ $chr(125)
 }
 

@@ -31,7 +31,7 @@ import {
 import { type Session, type SessionRegistry, silenceHint } from "../core/sessions.ts";
 import { emptyChannelWarning } from "../core/outcomes.ts";
 import { waitForEvent, type WaitMatcher } from "../core/waits.ts";
-import { classifyBotReply } from "../core/xdcc.ts";
+import { channelsIn, classifyBotReply, plainText } from "../core/xdcc.ts";
 import { alreadyHad, describeDownload, describeProgress } from "../core/dcc.ts";
 import type { LogSink } from "../core/log.ts";
 
@@ -512,6 +512,14 @@ const xdccFetchSchema = z.object({
     .optional()
     .describe("How long to wait for the bot's first answer (default 50000). The job goes on."),
   notifyOnFailure: z.boolean().optional().describe("Echo the failure into mIRC. Default true."),
+  topicRead: z
+    .boolean()
+    .optional()
+    .describe(
+      "The channel's topic names other channels, and having read it you judged that joining " +
+        "them is NOT required. Never set this to skip a requirement: joining is cheap, a ban " +
+        "is not.",
+    ),
 });
 const rawSchema = z.object({
   session: sessionArg,
@@ -948,7 +956,8 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     "irc_ensure_joined",
     {
       description:
-        "Make sure mIRC is in a channel, joining only if it is not already. This is the step " +
+        "Make sure mIRC is in a channel, joining only if it is not already. Returns the " +
+        "channel's topic: read it, since channels state their rules there. This is the step " +
         "to use before messaging a bot.",
       inputSchema: ensureJoinedSchema.shape,
     },
@@ -956,19 +965,22 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
       guarded(async () => {
         const s = sessionOf(registry, session);
         const net = await targetOf(s, network, stateFreshnessMs, cid);
-        if (s.state.isJoined(net, channel)) {
-          return json({
-            skipped: true,
-            reason: "already joined",
-            channel,
-            members: s.state.memberCount(net, channel),
-          });
-        }
+        // Asked of mIRC even when already joined: it answers that from its own
+        // records at once, with the topic, and sends nothing to the server.
         const outcome = await s.commands.send("join", { cid: net.cid, channel }, {
           context: "join",
         });
         if (!outcome.ok) return failure(explainJoinRefusal(outcome.error, net));
-        if (outcome.data?.already !== true) s.owned.joinedChannel(net.cid, channel);
+        if (outcome.data?.already === true) {
+          return json({
+            skipped: true,
+            reason: "already joined",
+            channel,
+            members: outcome.data.members ?? s.state.memberCount(net, channel),
+            topic: outcome.data.topic ?? null,
+          });
+        }
+        s.owned.joinedChannel(net.cid, channel);
         const members = typeof outcome.data?.members === "number"
           ? outcome.data.members
           : s.state.memberCount(net, channel);
@@ -1426,13 +1438,18 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     {
       description:
         "Request a pack from an XDCC bot: ensures mIRC is on the network and in the channel, " +
-        "confirms the bot is present, sends the request, then waits (up to ~50 s) for the bot " +
+        "checks the channel's topic (if it names other channels mIRC is not in, nothing is " +
+        "requested until they are joined: join_required), confirms the bot is present, sends " +
+        "the request, then waits (up to ~50 s) for the bot " +
         "to answer. Returns a job: queued (with position), offered (transfer starting), " +
         "refused (with the bot's reason), or still waiting. The job keeps updating afterwards; " +
         "follow it with irc_dcc_watch or irc_dcc_status.",
       inputSchema: xdccFetchSchema.shape,
     },
-    ({ session, network, channel, bot, pack, timeoutMs, notifyOnFailure }: XdccFetchArgs) =>
+    (
+      { session, network, channel, bot, pack, timeoutMs, notifyOnFailure, topicRead }:
+        XdccFetchArgs,
+    ) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
         const steps: string[] = [];
@@ -1481,17 +1498,44 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           });
         }
 
-        // 2. joined?
-        if (!s.state.isJoined(net, channel)) {
-          const joined = await s.commands.send("join", { cid: net.cid, channel }, {
-            context: "join",
-          });
-          if (!joined.ok) return await fail(explainJoinRefusal(joined.error, net));
-          if (joined.data?.already !== true) s.owned.joinedChannel(net.cid, channel);
+        // 2. joined? Asked of mIRC even when the state says so: in a channel
+        //    already, it answers at once from its own records (no server
+        //    traffic), and either way the answer carries the topic.
+        const joined = await s.commands.send("join", { cid: net.cid, channel }, {
+          context: "join",
+        });
+        if (!joined.ok) return await fail(explainJoinRefusal(joined.error, net));
+        if (joined.data?.already !== true) {
+          s.owned.joinedChannel(net.cid, channel);
           steps.push("joined");
         } else {
           steps.push("already joined");
         }
+
+        // The topic's conditions come before the request. Many XDCC channels ban
+        // anyone who downloads without also joining the channels their topic
+        // names, and a ban lands on the user, so the request waits until those
+        // channels are joined, or the agent has read the topic and judged a
+        // mention irrelevant.
+        const topic = typeof joined.data?.topic === "string" ? joined.data.topic : "";
+        const missing = channelsIn(topic).filter((c) =>
+          c.toLowerCase() !== channel.toLowerCase() && !s.state.isJoined(net, c)
+        );
+        if (missing.length > 0 && topicRead !== true) {
+          return failure(
+            bridgeError(
+              "join_required",
+              `nothing was requested yet. ${channel}'s topic names ` +
+                `${missing.join(", ")}, which mIRC is not in. Many XDCC channels ban anyone ` +
+                "who downloads without joining the channels their topic names. Read the topic: " +
+                `"${plainText(topic)}". If it asks for that, join each with irc_ensure_joined ` +
+                "(no need to ask the user, but tell them which channels you joined and why), " +
+                "then call xdcc_fetch again. If a channel is only mentioned (a help channel, an " +
+                "announcement), call again with topicRead: true.",
+            ),
+          );
+        }
+        if (missing.length > 0) steps.push(`topic read; not joining ${missing.join(", ")}`);
 
         // 3. is the bot actually here? Failing now beats waiting for a timeout.
         // Ask about the one nick rather than fetching the list: XDCC channels run to

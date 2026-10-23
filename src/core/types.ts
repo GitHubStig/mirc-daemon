@@ -40,7 +40,9 @@ export type ErrorCode =
   | "timeout"
   | "guard_denied"
   | "weak_match"
-  | "too_long";
+  | "too_long"
+  /** A channel's topic names channels mIRC is not in; join them before downloading. */
+  | "join_required";
 
 /** A structured failure. `hint` is written for an LLM to read and relay. */
 export interface BridgeError {
@@ -178,6 +180,11 @@ export const EVENT_KINDS = [
   "conn",
   "error",
   "dcc",
+  /**
+   * bridge.mrc held back `extra.count` events because mIRC's 16 KB socket send
+   * queue was nearly full: anything waited for in that gap may have been missed.
+   */
+  "dropped",
 ] as const;
 
 /**

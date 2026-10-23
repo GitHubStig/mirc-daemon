@@ -1,5 +1,40 @@
 import { assertEquals } from "@std/assert";
-import { classifyBotReply, parseDccAccept, parseDccOffer, plainText } from "../src/core/xdcc.ts";
+import {
+  channelsIn,
+  classifyBotReply,
+  parseDccAccept,
+  parseDccOffer,
+  plainText,
+} from "../src/core/xdcc.ts";
+
+Deno.test("channel names are found in a topic in any wording, and pack numbers are not", () => {
+  assertEquals(
+    channelsIn(
+      "\x02Welcome!\x02 You MUST be in #Main-Chat too, or you get banned. Packs #1-#40. " +
+        "Help: #help, news (&news). Devi entrare in #Lista!",
+    ),
+    ["#Main-Chat", "#help", "&news", "#Lista"],
+  );
+  // Abjects, 2026-10-23: a channel known to ban, though the words do not say so.
+  assertEquals(
+    channelsIn(
+      "#ARCHIVE-XDCC //   BLAZING SPEEDS ~ PROPER PACKS   //   join #ARCHIVE-CHAT for Search and " +
+        "much more.",
+    ),
+    ["#ARCHIVE-XDCC", "#ARCHIVE-CHAT"],
+  );
+  // The same topic as mIRC really reported it: bold inside the channel name.
+  assertEquals(
+    channelsIn(
+      "\x02#ARCHIVE-XDCC\x02 // \x1fBLAZING\x1f SPEEDS ~ \x1fPROPER\x1f PACKS // join " +
+        "#\x02ARCHIVE-CHAT\x02 for Search and much more.",
+    ),
+    ["#ARCHIVE-XDCC", "#ARCHIVE-CHAT"],
+  );
+  assertEquals(channelsIn("pack #39 is up, #39 again"), []);
+  assertEquals(channelsIn("join #a, #A and #b."), ["#a", "#b"]);
+  assertEquals(channelsIn(""), []);
+});
 
 Deno.test("plainText removes colours, bold and underline the way a person reads past them", () => {
   assertEquals(

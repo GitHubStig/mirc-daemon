@@ -1360,6 +1360,78 @@ Deno.test("xdcc_cancel: mIRC reporting the abort before acknowledging it still e
   }
 });
 
+// --- a channel's topic comes before the request ------------------------------------
+
+/** A bot channel whose topic names another channel, and mIRC joining as asked. */
+function topicChannel(s: Stack, topic: string): void {
+  s.fake.setHandler((cmd) => {
+    if (cmd.action === "members") return { ok: true, data: { count: 50, present: true } };
+    if (cmd.action === "join") {
+      const ch = String(cmd.params?.channel);
+      if (ch !== "#chan") {
+        s.fake.emit("join", { buf: ch, nick: "me" });
+        return { ok: true, data: { joined: ch, members: 30, topic: "" } };
+      }
+      return { ok: true, data: { joined: "#chan", members: 42, already: true, topic } };
+    }
+    return undefined;
+  });
+}
+
+Deno.test("xdcc_fetch requests nothing while the topic names channels mIRC is not in", async () => {
+  const s = await stack();
+  try {
+    topicChannel(s, "\x02Rules:\x02 stay in #Chat-Main or you will be banned. Pack #3 is new.");
+    const held = await s.client.callTool({ name: "xdcc_fetch", arguments: fetchArgs });
+    const text = textOf(held);
+    assertEquals(text.startsWith("join_required:"), true);
+    assertEquals(text.includes("#Chat-Main"), true);
+    assertEquals(text.includes("stay in #Chat-Main or you will be banned"), true);
+    assertEquals(s.fake.received.some((c) => c.action === "msg"), false);
+
+    // The agent joins as the topic asks; then the same call goes through.
+    await s.client.callTool({ name: "irc_ensure_joined", arguments: { channel: "#Chat-Main" } });
+    await s.client.callTool({ name: "xdcc_fetch", arguments: { ...fetchArgs, timeoutMs: 600 } });
+    assertEquals(
+      s.fake.received.filter((c) => c.action === "msg").map((c) => c.params?.text),
+      ["xdcc send #6"],
+    );
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("xdcc_fetch goes ahead past a mere mention once the agent says it read the topic", async () => {
+  const s = await stack();
+  try {
+    topicChannel(s, "Questions? Ask in #help.");
+    const body = JSON.parse(textOf(
+      await s.client.callTool({
+        name: "xdcc_fetch",
+        arguments: { ...fetchArgs, timeoutMs: 600, topicRead: true },
+      }),
+    ));
+    assertEquals(body.steps.includes("topic read; not joining #help"), true);
+    assertEquals(s.fake.received.some((c) => c.action === "msg"), true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("irc_ensure_joined returns the topic, even for a channel already joined", async () => {
+  const s = await stack();
+  try {
+    topicChannel(s, "Be in #Chat-Main too.");
+    const body = JSON.parse(textOf(
+      await s.client.callTool({ name: "irc_ensure_joined", arguments: { channel: "#chan" } }),
+    ));
+    assertEquals(body.skipped, true);
+    assertEquals(body.topic, "Be in #Chat-Main too.");
+  } finally {
+    await s.stop();
+  }
+});
+
 // --- asking again, resumes and progress (seen live, 2026-10-23) ------------------
 
 const ISO = "ubuntu-mate-16.04.4-desktop-amd64.iso";

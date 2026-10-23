@@ -314,6 +314,21 @@ Proven by running it, with evidence in the log:
   disconnected windows. It refreshes first, and refuses without `confirm: true` if any of them is
   the user's, naming them. Live: an agent window was opened, disconnected and closed in 41 ms.
 
+- **A channel's topic comes before an XDCC request** (2026-10-23, Abjects, the user's connection,
+  with their go-ahead; nothing was downloaded). Some XDCC channels ban anyone who downloads without
+  also joining the channels their topic names, whatever the topic's wording. `#ARCHIVE-XDCC`'s says
+  only "join #ARCHIVE-CHAT for Search and much more."
+  - Join replies now carry the topic (`$chan(#).topic`, capped at 400 characters), including for a
+    channel mIRC is already in. mIRC answers that from its own records, without the server.
+  - `xdcc_fetch` finds the channel names in the topic, as IRC syntax rather than wording, so in any
+    language. Formatting is stripped first: the real topic had bold inside `#ARCHIVE-CHAT`. Pack
+    numbers like `#39` or `#1-#40` are ignored. While any named channel is not joined, nothing is
+    requested: it returns `join_required`, quoting the topic.
+  - The agent joins those channels by itself, tells the user which and why, and calls again.
+    `topicRead: true` lets a mere mention (a help channel) through.
+  - Live: the join returned the topic in 896 ms (722 members), and `xdcc_fetch` stopped at
+    `join_required` naming `#ARCHIVE-CHAT`, in 8 ms, with nothing sent to any bot.
+
 ## Not verified
 
 Assumed or untested. Treat these as the actual risk surface.
@@ -421,6 +436,15 @@ Found by the live run, invisible to every test because the test double was shape
 16. **`FILERCVD` and `GETFAIL` need a filename field.** `on *:GETFAIL:` also loads and never fires.
     It is `on *:GETFAIL:*:`. When writing any mIRC event header, check its exact field list; a
     missing field is not an error, just silence.
+
+Not silent, but the same lesson, that the test double never sends what real IRC does:
+
+17. **mIRC's socket send queue holds 16 KB, and a big channel's join overruns it.** Joining
+    `#ARCHIVE-XDCC` on Abjects (722 users) mirrored its member list, hundreds of `353` lines at once,
+    and every `/sockwrite` after that failed: "queue would exceed 16384 bytes", over and over in the
+    user's status window. Bulk numerics (353, 352, 322, 367) are no longer mirrored. Events back off
+    while the queue is over 12 KB, and a `dropped` event with the count follows once there is room.
+    Replies are never dropped. After the fix, the same join produced no errors and nothing dropped.
 
 ## Running it
 

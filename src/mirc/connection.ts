@@ -219,6 +219,9 @@ export async function handleMircConnection(
       connectionLog.warn("mbp.ev-before-hello", { kind: frame.kind });
       return;
     }
+    if (frame.kind === "dropped") {
+      connectionLog.warn("mirc.events-dropped", { count: frame.extra?.count });
+    }
     session.record({
       kind: frame.kind,
       cid: typeof frame.cid === "number" ? frame.cid : undefined,

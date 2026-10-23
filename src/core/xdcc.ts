@@ -99,6 +99,29 @@ export function classifyBotReply(text: string): BotReply {
   return { kind: "unknown", text: plain };
 }
 
+/**
+ * Channel names a topic mentions. Many XDCC channels ban anyone who downloads
+ * without also joining the channels their topic names, in whatever words and
+ * language the topic happens to use. A channel name is IRC syntax rather than
+ * wording, so it can be found in any language; whether the topic *requires*
+ * joining it is left to the agent reading the topic.
+ *
+ * Digits after `#` are pack numbers ("pack #39", "#1-#40"), not channels.
+ */
+export function channelsIn(topic: string): string[] {
+  const found: string[] = [];
+  for (
+    const m of plainText(topic).matchAll(/(?:^|[\s,(\[{:;"'<>|/])([#&][^\s,:;"'()\[\]{}<>|]+)/g)
+  ) {
+    // Sentence punctuation after a name is not part of it.
+    const name = m[1].replace(/[.!?*]+$/, "");
+    // Pack numbers and ranges ("#39", "#1-#40") are not channels.
+    if (name.length < 2 || /^[#&][\d#-]+$/.test(name)) continue;
+    if (!found.some((f) => f.toLowerCase() === name.toLowerCase())) found.push(name);
+  }
+  return found;
+}
+
 export interface DccOffer {
   file: string;
   /** Bytes, when the offer says (it normally does). */

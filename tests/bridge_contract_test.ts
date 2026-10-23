@@ -252,6 +252,40 @@ Deno.test("a join reply carrying members, and one carrying a numeric, are both r
   }
 });
 
+Deno.test("the dropped-events notice bridge_send builds is recorded with its count", async () => {
+  const h = await attach();
+  try {
+    const session = h.session()!;
+    // As the mSL builds it: no cid, an empty net, the count bare.
+    h.mirc.sendLine(`{"t":"ev","kind":"dropped","net":"","extra":{"count":214}}`);
+    await until(() => session.log.cursor > 0, { label: "dropped recorded" });
+    const event = session.log.since(0, { kinds: ["dropped"] })[0];
+    assertEquals(event?.kind, "dropped");
+    assertEquals(event?.extra?.count, 214);
+  } finally {
+    await h.stop();
+  }
+});
+
+Deno.test("a join reply's topic, escaped as bridge_topickv escapes it, arrives intact", async () => {
+  const h = await attach();
+  try {
+    const session = h.session()!;
+    const topic = '\x0304\x02Rules:\x02\x03 be in "#Chat-Main" too \\ or be banned';
+    const joined = session.commands.send("join", { channel: "#chan" }, { context: "join" });
+    const cmd = await h.mirc.nextCommand("join");
+    h.mirc.sendLine(
+      `{"t":"res","id":"${cmd.id}","ok":true,"data":{"joined":"#chan","members":7,` +
+        `"already":true,"topic":${mslJstr(topic)}}}`,
+    );
+    const outcome = await joined;
+    assertEquals(outcome.ok, true);
+    if (outcome.ok) assertEquals(outcome.data?.topic, topic);
+  } finally {
+    await h.stop();
+  }
+});
+
 Deno.test("the event shapes bridge.mrc emits land in the right places", async () => {
   const h = await attach();
   try {
