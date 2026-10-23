@@ -166,9 +166,9 @@ Deno.test("the MCP surface advertises the tools an agent needs", async () => {
         "irc_close_windows",
         "irc_connect",
         "irc_dcc_status",
-        "irc_ensure_connected",
         "irc_ensure_joined",
         "irc_get_state",
+        "irc_history",
         "irc_ison",
         "irc_join",
         "irc_members",
@@ -533,12 +533,48 @@ function growOnConnect(s: Stack, cid: number, name: string): void {
   });
 }
 
-Deno.test("irc_ensure_connected adds a connection and leaves the existing one alone", async () => {
+Deno.test("a new connection to a network mIRC is already on is closed again", async () => {
+  // The user is on net1 (cid 1); the agent names a different server of net1.
+  const s = await stack();
+  try {
+    growOnConnect(s, 9, "net1");
+    const body = JSON.parse(textOf(
+      await s.client.callTool({ name: "irc_connect", arguments: { server: "irc2.example.net" } }),
+    ));
+    assertEquals(body.skipped, true);
+    assertEquals(body.network.cid, 1);
+    assertEquals(
+      s.fake.received.filter((c) => c.action === "disconnect").map((c) => c.params?.cid),
+      [9],
+    );
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("second: true keeps a second connection when the user asked for one", async () => {
+  const s = await stack();
+  try {
+    growOnConnect(s, 9, "net1");
+    const body = JSON.parse(textOf(
+      await s.client.callTool({
+        name: "irc_connect",
+        arguments: { network: "net1", server: "irc2.example.net", second: true },
+      }),
+    ));
+    assertEquals(body.network.cid, 9);
+    assertEquals(s.fake.received.some((c) => c.action === "disconnect"), false);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("irc_connect adds a connection and leaves the existing one alone", async () => {
   const s = await stack();
   try {
     growOnConnect(s, 7, "Rizon");
     const result = await s.client.callTool({
-      name: "irc_ensure_connected",
+      name: "irc_connect",
       arguments: { network: "Rizon", server: "irc.rizon.net" },
     });
     const body = JSON.parse(textOf(result));
@@ -567,7 +603,7 @@ Deno.test("an existing connection is reused, by network name or by server", asyn
       ]
     ) {
       const body = JSON.parse(
-        textOf(await s.client.callTool({ name: "irc_ensure_connected", arguments: args })),
+        textOf(await s.client.callTool({ name: "irc_connect", arguments: args })),
       );
       assertEquals(body.skipped, true, JSON.stringify(args));
       assertEquals(body.network.cid, 1);
@@ -587,7 +623,7 @@ Deno.test("commands go to the connection their network names", async () => {
   try {
     growOnConnect(s, 7, "Rizon");
     await s.client.callTool({
-      name: "irc_ensure_connected",
+      name: "irc_connect",
       arguments: { network: "Rizon", server: "irc.rizon.net" },
     });
     s.fake.setHandler(undefined);
@@ -619,7 +655,7 @@ Deno.test("a bot's reply only counts if it comes from the bot's own connection",
   try {
     growOnConnect(s, 7, "Rizon");
     await s.client.callTool({
-      name: "irc_ensure_connected",
+      name: "irc_connect",
       arguments: { network: "Rizon", server: "irc.rizon.net" },
     });
     s.fake.setHandler((cmd, fake) => {
@@ -716,7 +752,7 @@ Deno.test("the agent's own connection can be closed; the user's needs confirm", 
   try {
     growOnConnect(s, 7, "Rizon");
     await s.client.callTool({
-      name: "irc_ensure_connected",
+      name: "irc_connect",
       arguments: { network: "Rizon", server: "irc.rizon.net" },
     });
     s.fake.setHandler(undefined);
@@ -752,7 +788,7 @@ Deno.test("irc_close_windows closes the agent's idle windows; the user's need co
   try {
     growOnConnect(s, 7, "Rizon");
     await s.client.callTool({
-      name: "irc_ensure_connected",
+      name: "irc_connect",
       arguments: { network: "Rizon", server: "irc.rizon.net" },
     });
     const rizonQuit = network({
@@ -832,6 +868,111 @@ Deno.test("irc_mode reports the modes the server then shows, or its refusal", as
       arguments: { channel: "#chan", modes: "+i" },
     });
     assertEquals(textOf(users).startsWith("guard_denied:"), true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("irc_history returns mIRC's lines, offers the page before, and names missing windows", async () => {
+  const s = await stack();
+  try {
+    s.fake.setHandler((cmd) => {
+      if (cmd.action !== "history") return undefined;
+      if (cmd.params?.window === "#gone") return { ok: false, numeric: 0, err: "no-such-window" };
+      return {
+        ok: true,
+        data: {
+          total: 120,
+          from: 71,
+          lines: ["[10:01] <Opper> \x02hi\x02", "[10:02] <me> hello"],
+        },
+      };
+    });
+    const body = JSON.parse(textOf(
+      await s.client.callTool({ name: "irc_history", arguments: { window: "#chan", lines: 50 } }),
+    ));
+    assertEquals(body.lines, ["[10:01] <Opper> hi", "[10:02] <me> hello"]);
+    // 50 asked, 2 returned: mIRC's per-reply cap, which the agent must be told.
+    assertEquals(body.returned, 2);
+    assertEquals(body.capped.includes("Only 2 of the 50"), true);
+    assertEquals(body.capped.includes("before: 71"), true);
+    assertEquals(s.fake.received.find((c) => c.action === "history")?.params?.before, 0);
+
+    const gone = await s.client.callTool({ name: "irc_history", arguments: { window: "#gone" } });
+    assertEquals(textOf(gone).startsWith("not_on_channel:"), true);
+    assertEquals(textOf(gone).includes("#chan"), true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("irc_read says how far back it sees, and when a channel name matches nothing", async () => {
+  const s = await stack();
+  try {
+    const typo = JSON.parse(textOf(
+      await s.client.callTool({ name: "irc_read", arguments: { buffer: "#cha" } }),
+    ));
+    assertEquals(typeof typo.seenSince, "string");
+    assertEquals(typo.note.includes("There is no channel or query named #cha"), true);
+    assertEquals(typo.note.includes("Did you mean #chan"), true);
+
+    const quiet = JSON.parse(textOf(
+      await s.client.callTool({ name: "irc_read", arguments: { buffer: "#chan" } }),
+    ));
+    assertEquals(quiet.note, undefined);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("xdcc_list ends at once on 'no such nick' instead of waiting for the bot", async () => {
+  const s = await stack();
+  try {
+    s.fake.setHandler((cmd) => {
+      if (cmd.action === "msg") emitRaw(s, "401 me NoSuchBot No such nick/channel");
+      return undefined;
+    });
+    const started = Date.now();
+    const result = await s.client.callTool({
+      name: "xdcc_list",
+      arguments: { bot: "NoSuchBot", timeoutMs: 5000 },
+    });
+    assertEquals(textOf(result).startsWith("nick_not_found:"), true);
+    assertEquals(Date.now() - started < 2000, true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("a bot command sent into a channel comes back with where to look for the reply", async () => {
+  const s = await stack();
+  try {
+    const cmd = JSON.parse(textOf(
+      await s.client.callTool({
+        name: "irc_send",
+        arguments: { target: "#chan", text: "!search debian" },
+      }),
+    ));
+    assertEquals(cmd.warnings[0].hint.includes("xdcc_search"), true);
+    assertEquals(cmd.warnings[0].hint.includes("direct: true"), true);
+
+    const chat = JSON.parse(textOf(
+      await s.client.callTool({ name: "irc_send", arguments: { target: "#chan", text: "hi all" } }),
+    ));
+    assertEquals(chat.warnings, []);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("irc_disconnect says the window stays and how to close it", async () => {
+  const s = await stack();
+  try {
+    s.mirc.registry.resolve()!.owned.openedConnection(1);
+    const body = JSON.parse(textOf(
+      await s.client.callTool({ name: "irc_disconnect", arguments: { cid: 1 } }),
+    ));
+    assertEquals(body.window.includes("irc_close_windows"), true);
   } finally {
     await s.stop();
   }
@@ -1003,13 +1144,13 @@ Deno.test("the agent reconnects its own quit window instead of opening another",
     windowsLikeMirc(s, [network()]);
     const args = { network: "Rizon", server: "irc.rizon.net" };
     const first = JSON.parse(
-      textOf(await s.client.callTool({ name: "irc_ensure_connected", arguments: args })),
+      textOf(await s.client.callTool({ name: "irc_connect", arguments: args })),
     );
     assertEquals(first.reusedWindow, false);
     await s.client.callTool({ name: "irc_disconnect", arguments: { network: "Rizon" } });
 
     const second = JSON.parse(
-      textOf(await s.client.callTool({ name: "irc_ensure_connected", arguments: args })),
+      textOf(await s.client.callTool({ name: "irc_connect", arguments: args })),
     );
     assertEquals(second.reusedWindow, "agent's");
     assertEquals(second.network.cid, first.network.cid);
@@ -1044,7 +1185,7 @@ Deno.test("the user's quit window is reconnected, and stays the user's", async (
     await s.mirc.registry.resolve()!.refreshState();
     const body = JSON.parse(textOf(
       await s.client.callTool({
-        name: "irc_ensure_connected",
+        name: "irc_connect",
         arguments: { network: "Rizon", server: "irc.rizon.net" },
       }),
     ));
@@ -1081,7 +1222,7 @@ Deno.test("the agent's own quit window is preferred over the user's", async () =
 
     const body = JSON.parse(textOf(
       await s.client.callTool({
-        name: "irc_ensure_connected",
+        name: "irc_connect",
         arguments: { network: "Rizon", server: "irc.rizon.net" },
       }),
     ));
@@ -1244,7 +1385,7 @@ Deno.test("tls: true goes to mIRC as a plain number flag", async () => {
   try {
     growOnConnect(s, 7, "Libera");
     await s.client.callTool({
-      name: "irc_ensure_connected",
+      name: "irc_connect",
       arguments: { network: "Libera", server: "irc.libera.chat", tls: true },
     });
     const connect = s.fake.received.find((c) => c.action === "connect");

@@ -370,6 +370,8 @@ alias -l bridge_command {
   ; status window does nothing). The daemon decides whether that is allowed.
   if (%act == closewin) { close -it | bridge_ok %id | return }
   if (%act == note) { bridge_note $jparam(%f, text) | bridge_ok %id | return }
+  ; Numbers are not encoded, so lines and before are read with jnum.
+  if (%act == history) { bridge_do_history %id $jparam(%f, window) $iif($jnum(%f, lines), $v1, 50) $iif($jnum(%f, before), $v1, 0) | return }
   ; Sent and acknowledged at once; what the server says back arrives as raw
   ; events (324, 311-318, refusals), which the daemon reads. Without modes,
   ; MODE asks for the channel's current ones.
@@ -491,6 +493,31 @@ alias -l bridge_do_topic {
   if ($3- != $null) { topic $2 $3- | bridge_ok $1 | return }
   if ($me !ison $2) { bridge_fail $1 0 not-on-channel | return }
   bridge_ok $1 $bridge_topickv($2)
+}
+
+; $1 = id, $2 = window (a channel or query), $3 = how many lines, $4 = 0 for
+; the newest, or the line number to stop before (paging back).
+; mIRC's own scrollback, as it shows it, timestamps included: the daemon only
+; sees what happens while it is connected, and an agent asked what was said in
+; a channel had nothing to go on. Lines go into the frame newest first, so the
+; cap (about 2600 characters, under the frame limit) trims the oldest; "from"
+; says where the page starts, for the next page back.
+alias -l bridge_do_history {
+  if (!$window($2)) { bridge_fail $1 0 no-such-window | return }
+  var %total = $line($2, 0)
+  var %last = %total
+  if ($4 > 0) %last = $calc($4 - 1)
+  var %first = $calc(%last - $3 + 1)
+  if (%first < 1) %first = 1
+  var %out, %i = %last
+  while (%i >= %first) {
+    var %l = $jstr($line($2, %i))
+    if ($calc($len(%out) + $len(%l)) > 2600) break
+    if (%out == $null) %out = %l
+    else %out = %l $+ $chr(44) $+ %out
+    dec %i
+  }
+  bridge_ok $1 $kvo(total, %total) $+ $chr(44) $+ $kvo(from, $calc(%i + 1)) $+ $chr(44) $+ $kvo(lines, $chr(91) $+ %out $+ $chr(93))
 }
 
 alias -l bridge_do_join {

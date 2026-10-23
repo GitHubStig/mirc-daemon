@@ -249,7 +249,9 @@ export type ActionName =
   /** Read a channel's topic from mIRC, or set it with `text`. */
   | "topic"
   /** A line in mIRC's @bridge window saying what the agent did. */
-  | "note";
+  | "note"
+  /** The last lines of one of mIRC's windows ($line), its own scrollback. */
+  | "history";
 
 export interface CmdFrame {
   t: "cmd";

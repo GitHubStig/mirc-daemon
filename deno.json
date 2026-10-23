@@ -6,6 +6,7 @@
     "check": "deno check src/main.ts scripts/ tests/",
     "token": "deno run --allow-read --allow-write=mirc scripts/token.ts",
     "log:tail": "deno run --allow-read=logs scripts/log_tail.ts",
+    "report": "deno run --allow-read=logs scripts/session_report.ts",
     "fmt": "deno fmt",
     "lint": "deno lint"
   },

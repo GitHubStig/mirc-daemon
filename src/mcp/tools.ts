@@ -314,6 +314,33 @@ function botSaid(job: DccJob): Record<string, unknown> {
   };
 }
 
+/**
+ * When a read of `buffer` finds nothing, whether that is because no channel or
+ * query by that name exists. Seen live: an agent asked for "#home" when the
+ * channel is "#home!", got an empty answer, and took it for a quiet channel.
+ */
+function unknownBuffer(s: Session, buffer: string, network?: string): string | undefined {
+  const nets = s.state.networks().filter((n) =>
+    network === undefined || sameNetwork(n.name, network)
+  );
+  const names = new Set<string>(nets.flatMap((n) => n.channels));
+  for (const e of s.log.since(0, { net: network, limit: 2000, keep: "newest" })) {
+    if (e.buf) names.add(e.buf);
+  }
+  const want = buffer.toLowerCase();
+  if ([...names].some((n) => n.toLowerCase() === want)) return undefined;
+  const close = [...names].filter((n) =>
+    n.toLowerCase().startsWith(want) || want.startsWith(n.toLowerCase()) ||
+    n.toLowerCase().includes(want.replace(/^[#&]/, ""))
+  );
+  return `There is no channel or query named ${buffer}` +
+    (network ? ` on ${network}` : "") + ", so nothing was found, not a quiet channel." +
+    (close.length > 0 ? ` Did you mean ${close.slice(0, 3).join(" or ")}?` : "") +
+    (nets.some((n) => n.channels.length > 0)
+      ? ` mIRC is in: ${nets.flatMap((n) => n.channels).slice(0, 10).join(", ")}.`
+      : "");
+}
+
 /** What mIRC will do with an offer, from its DCC send-request setting ($sreq). */
 function acceptance(session: Session): string {
   switch (session.sreq) {
@@ -380,17 +407,13 @@ const isonSchema = z.object({
 });
 const connectSchema = z.object({
   session: sessionArg,
-  server: z.string(),
-  port: z.int().min(1).max(65535).optional(),
-  tls: z
-    .boolean()
+  network: z
+    .string()
     .optional()
-    .describe("Connect over TLS (mIRC's +port). The port defaults to 6697 when this is set."),
-  password: z.string().optional().describe("Server password, if required. Not logged."),
-});
-const ensureConnectedSchema = z.object({
-  session: sessionArg,
-  network: z.string().describe("Network name, e.g. Rizon. Matched case-insensitively."),
+    .describe(
+      "Network name, e.g. EFnet or Rizon, matched case-insensitively. Pass it whenever you " +
+        "know it: it is what lets a connection the user already has be reused.",
+    ),
   server: z
     .string()
     .optional()
@@ -401,6 +424,13 @@ const ensureConnectedSchema = z.object({
     .optional()
     .describe("Connect over TLS (mIRC's +port). The port defaults to 6697 when this is set."),
   password: z.string().optional().describe("Server password, if required. Not logged."),
+  second: z
+    .boolean()
+    .optional()
+    .describe(
+      "Open another connection even though mIRC is already on that network. Only when the " +
+        "user asked for one: several connections from one host can get the user banned.",
+    ),
 });
 const joinSchema = z.object({
   session: sessionArg,
@@ -451,6 +481,19 @@ const modeSchema = z.object({
     .describe('Mode changes as IRC writes them, e.g. "+i", "-i+k secret", "+o nick".'),
   confirm: confirmArg,
 });
+const historySchema = z.object({
+  session: sessionArg,
+  network: networkArg,
+  cid: cidArg,
+  window: z.string().describe("A channel (#name) or a query (the other person's nick)."),
+  lines: z.int().min(1).max(200).optional().describe("How many of the newest lines (default 50)."),
+  before: z
+    .int()
+    .positive()
+    .optional()
+    .describe("Page back: only lines before this line number (`from` of a previous answer)."),
+});
+type HistoryArgs = z.infer<typeof historySchema>;
 const whoisSchema = z.object({
   session: sessionArg,
   network: networkArg,
@@ -611,7 +654,6 @@ type ReadArgs = z.infer<typeof readSchema>;
 type MembersArgs = z.infer<typeof membersSchema>;
 type IsonArgs = z.infer<typeof isonSchema>;
 type ConnectArgs = z.infer<typeof connectSchema>;
-type EnsureConnectedArgs = z.infer<typeof ensureConnectedSchema>;
 type JoinArgs = z.infer<typeof joinSchema>;
 type EnsureJoinedArgs = z.infer<typeof ensureJoinedSchema>;
 type PartArgs = z.infer<typeof partSchema>;
@@ -767,8 +809,9 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     "irc_read",
     {
       description:
-        "Read retained IRC activity, oldest first. Returns a cursor to pass to a later call " +
-        "so you only get what is new.",
+        "Read IRC activity the daemon has seen, oldest first: only since it last connected to " +
+        "mIRC (see seenSince). For anything older, irc_history reads mIRC's own window. " +
+        "Returns a cursor to pass to a later call so you only get what is new.",
       inputSchema: readSchema.shape,
     },
     ({ session, network, buffer, since, limit, kinds }: ReadArgs) =>
@@ -776,17 +819,88 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         const s = sessionOf(registry, session);
         const max = limit ?? 50;
         const query = { net: network, buf: buffer, kinds };
+        // How far back this can see, so "nothing" reads as "nothing since then"
+        // rather than as lost history. A real agent could not tell the two apart.
+        const oldest = s.log.since(0, { limit: 1, keep: "oldest" })[0];
+        const seenSince = new Date(
+          oldest !== undefined && oldest.seq > 1 ? oldest.ts : s.connectedTs,
+        ).toISOString();
+        let events: BridgeEvent[];
+        let cursor: number;
+        let more = false;
         if (since === undefined) {
-          const events = s.log.since(0, { ...query, limit: max });
-          return json({ cursor: s.log.cursor, events, more: false });
+          events = s.log.since(0, { ...query, limit: max });
+          cursor = s.log.cursor;
+        } else {
+          // Paging: keep the oldest so nothing between two polls is skipped, and
+          // hand back a cursor at the last event returned rather than at the head.
+          const page = s.log.since(since, { ...query, limit: max + 1, keep: "oldest" });
+          more = page.length > max;
+          events = page.slice(0, max);
+          cursor = more ? events[events.length - 1].seq : s.log.cursor;
         }
-        // Paging: keep the oldest so nothing between two polls is skipped, and hand
-        // back a cursor at the last event returned rather than at the head.
-        const page = s.log.since(since, { ...query, limit: max + 1, keep: "oldest" });
-        const more = page.length > max;
-        const events = page.slice(0, max);
-        const cursor = more ? events[events.length - 1].seq : s.log.cursor;
-        return json({ cursor, events, more });
+        const unknown = events.length === 0 && buffer !== undefined
+          ? unknownBuffer(s, buffer, network)
+          : undefined;
+        return json({ cursor, events, more, seenSince, ...(unknown ? { note: unknown } : {}) });
+      }),
+  );
+
+  tool(
+    "irc_history",
+    {
+      description:
+        "Read the last lines of one of mIRC's windows (a channel or a query), as mIRC shows " +
+        "them, timestamps included: its own scrollback, however long ago, where irc_read only " +
+        "has what the daemon saw since it last connected. Page back with `before`.",
+      inputSchema: historySchema.shape,
+    },
+    ({ session, network, cid, window, lines, before }: HistoryArgs) =>
+      guarded(async () => {
+        const s = sessionOf(registry, session);
+        const net = await targetOf(s, network, stateFreshnessMs, cid);
+        const outcome = await s.commands.send("history", {
+          cid: net.cid,
+          window,
+          lines: lines ?? 50,
+          before: before ?? 0,
+        });
+        if (!outcome.ok) {
+          if (outcome.error.detail === "no-such-window") {
+            return failure(
+              bridgeError(
+                "not_on_channel",
+                `mIRC has no window called ${window} on ${net.name}` +
+                  (net.channels.length > 0 ? `; it is in ${net.channels.join(", ")}.` : ".") +
+                  " A window closes when its channel is left, and its scrollback goes with it.",
+              ),
+            );
+          }
+          return failure(outcome.error);
+        }
+        const got = Array.isArray(outcome.data?.lines) ? (outcome.data.lines as string[]) : [];
+        const from = typeof outcome.data?.from === "number" ? outcome.data.from : undefined;
+        const asked = lines ?? 50;
+        // mIRC caps a reply to fit one frame, so fewer may come back than asked.
+        // Seen with a real agent: it asked for 200, got about 40, and told the
+        // user it had read "the last 200 lines".
+        const capped = got.length < asked && from !== undefined && from > 1;
+        return json({
+          window,
+          network: net.name,
+          returned: got.length,
+          lines: got.map((l) => plainText(l)),
+          ...(from !== undefined ? { from } : {}),
+          total: outcome.data?.total ?? null,
+          ...(capped
+            ? {
+              capped: `Only ${got.length} of the ${asked} lines asked for fit in one reply. ` +
+                `Pass before: ${from} for the lines before these.`,
+            }
+            : from !== undefined && from > 1
+            ? { older: `Earlier lines exist: pass before: ${from} for the page before these.` }
+            : {}),
+        });
       }),
   );
 
@@ -864,9 +978,11 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
       tls?: boolean;
       password?: string;
       network?: string;
+      /** The user asked for another connection to a network mIRC is already on. */
+      second?: boolean;
     },
   ): Promise<ToolResult> {
-    const { server, port, tls, password, network } = target;
+    const { server, port, tls, password, network, second } = target;
     const quitWindows = s.state.networks().filter((n) =>
       n.status === "disconnected" &&
       ((network !== undefined && sameNetwork(n.name, network)) ||
@@ -936,6 +1052,33 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     if (refreshError) return failure(refreshError);
     const cid = typeof outcome.data?.cid === "number" ? outcome.data.cid : undefined;
     const net = cid === undefined ? undefined : s.state.byCid(cid);
+
+    // Only now is the network's name known (the server announces it). A server
+    // name the agent picked can belong to a network the user is already on
+    // through another server, e.g. irc.efnet.org while they are on
+    // efnet.deic.eu. Several connections from one host can get the user banned,
+    // so the duplicate is closed again at once and the existing one used.
+    const twin = net && second !== true
+      ? s.state.networks().find((n) =>
+        n.cid !== net.cid && n.status === "connected" && sameNetwork(n.name, net.name)
+      )
+      : undefined;
+    if (net && twin) {
+      await s.commands.send("disconnect", { cid: net.cid }, { timeoutMs: 15_000 });
+      s.note(
+        `connected to ${server}, but that is ${net.name}, which mIRC was already on ` +
+          `(cid ${twin.cid}); closed the new connection again`,
+      );
+      await s.refreshState();
+      return json({
+        skipped: true,
+        reason: `${server} is on ${net.name}, which mIRC is already connected to (cid ` +
+          `${twin.cid}); the new connection was closed again and the existing one is the one ` +
+          "to use. Pass network next time to skip the round trip.",
+        network: s.state.byCid(twin.cid) ?? twin,
+      });
+    }
+
     s.note(`connected to ${server}${net ? ` (${net.name}, cid ${net.cid})` : ""}`);
     return json({
       skipped: false,
@@ -957,52 +1100,36 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     "irc_connect",
     {
       description:
-        "Connect mIRC to an IRC server as an ADDITIONAL connection; existing connections are " +
-        "never touched. If mIRC is already connected to that server, it is reused instead. " +
-        "Prefer irc_ensure_connected, which also reuses a connection to the same network " +
-        "through a different server.",
+        "Make sure mIRC is on a network. A live connection to that network (or that server), " +
+        "the user's included, is reused, never replaced. Otherwise a quit window for it is " +
+        "reconnected, or a new connection is opened alongside the others. Pass network " +
+        "whenever you know it. A new connection that turns out to duplicate a network mIRC is " +
+        "already on is closed again at once, since several connections from one host can get " +
+        "the user banned; pass second: true only if the user asked for another.",
       inputSchema: connectSchema.shape,
     },
-    ({ session, server, port, tls, password }: ConnectArgs) =>
+    ({ session, network, server, port, tls, password, second }: ConnectArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
         await freshen(s, stateFreshnessMs);
-        const existing = existingConnection(s, server);
-        if (existing) {
-          return json({ skipped: true, reason: "already connected", network: existing });
-        }
-        return await openConnection(s, { server, port, tls, password });
-      }),
-  );
-
-  tool(
-    "irc_ensure_connected",
-    {
-      description:
-        "Make sure mIRC is on a network. If any connection to that network (or that server) is " +
-        "up, including one the user opened, it is reused. Otherwise a quit window for that " +
-        "network is reconnected (the user's stays the user's), or a new connection is opened " +
-        "alongside the existing ones. A live connection is never disconnected or replaced.",
-      inputSchema: ensureConnectedSchema.shape,
-    },
-    ({ session, network, server, port, tls, password }: EnsureConnectedArgs) =>
-      guarded(async () => {
-        const s = sessionOf(registry, session);
-        await freshen(s, stateFreshnessMs);
-        const existing = existingConnection(s, server, network);
-        if (existing) {
-          return json({ skipped: true, reason: "already connected", network: existing });
+        if (second !== true) {
+          const existing = existingConnection(s, server, network);
+          if (existing) {
+            return json({ skipped: true, reason: "already connected", network: existing });
+          }
         }
         if (!server) {
           return failure(
             bridgeError(
               "unknown_network",
-              `mIRC is not on "${network}" and no server was given. Pass server (and port) ` +
-                "to connect, or check the network name.",
+              network
+                ? `mIRC is not on "${network}" and no server was given. Pass server (and ` +
+                  "port, and tls if it needs it) to connect, or check the network name."
+                : "pass network, server, or both.",
             ),
           );
         }
-        return await openConnection(s, { server, port, tls, password, network });
+        return await openConnection(s, { server, port, tls, password, network, second });
       }),
   );
 
@@ -1352,7 +1479,14 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         s.note(`disconnected from ${net.name} (cid ${net.cid})`);
         const error = await s.refreshState();
         if (error) return failure(error);
-        return json({ ok: true, network: s.state.byCid(net.cid) ?? null });
+        return json({
+          ok: true,
+          network: s.state.byCid(net.cid) ?? null,
+          // Seen with a real agent: told to clean up, it disconnected and left the
+          // windows behind, never knowing they stay.
+          window: "The connection's window stays open in mIRC, disconnected. irc_close_windows " +
+            "closes it, if tidying up is part of what the user asked.",
+        });
       }),
   );
 
@@ -1403,7 +1537,23 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           context: "message",
         });
         if (outcome.ok) s.note(`said to ${target} on ${net.name}: ${text}`);
-        return fromOutcome(outcome);
+        // A bot command typed into a channel. Seen with a real agent: it sent
+        // "!search debian" this way, then waited in the channel, while the
+        // results came privately, as notices from the search bot.
+        const botCommand = outcome.ok && isChannelBuffer(target) && /^[!@][a-z]/i.test(text);
+        return fromOutcome(
+          outcome,
+          botCommand
+            ? [
+              bridgeError(
+                "weak_match",
+                "that looks like a bot command. Bots usually answer privately (a notice from " +
+                  "the bot, under the bot's nick), not in the channel: wait with irc_wait_for " +
+                  "{direct: true}. For a search, xdcc_search sends it and collects the results.",
+              ),
+            ]
+            : [],
+        );
       }),
   );
 
@@ -1446,7 +1596,9 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
       description:
         "Block until a matching message arrives, then return it. Prefer this to polling " +
         "irc_read. Pass `since` (a cursor from irc_read) to also match messages that already " +
-        "arrived, which avoids missing a reply that landed just before the call.",
+        "arrived, which avoids missing a reply that landed just before the call. A bot's reply " +
+        "to a command usually comes privately, under the bot's nick, not in the channel: use " +
+        "`direct: true` (and `nick`), not the channel as `buffer`.",
       inputSchema: waitSchema.shape,
     },
     ({ session, network, kind, buffer, nick, pattern, direct, since, timeoutMs }: WaitArgs) =>
@@ -1642,15 +1794,32 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
 
         // Only this connection: the same nick can belong to someone else elsewhere.
         const matcher: WaitMatcher = { cid: net.cid, nick: bot, direct: true };
+        // The server says at once when there is no such nick (401); waiting for
+        // the bot instead cost a real agent 20 s and a misleading "may be busy".
         const first = await waitForEvent({
           log: s.log,
           bus: s.bus,
           signal: s.closed,
-          matcher,
+          matcher: {
+            cid: net.cid,
+            test: (e) =>
+              (e.kind === "raw" && numericOf(e) === 401 && isAbout(e, bot)) ||
+              (e.kind !== "raw" && (e.nick ?? "").toLowerCase() === bot.toLowerCase() &&
+                !isChannelBuffer(e.buf)),
+          },
           since: cursor,
           timeoutMs: Math.max(0, deadline - Date.now()),
         });
         if (!first && s.closed.aborted) return linkDropped();
+        if (first?.kind === "raw") {
+          return failure(
+            bridgeError(
+              "nick_not_found",
+              `there is no ${bot} on ${net.name}: the server says no such nick. Check the bot's ` +
+                "name (bots often have prefixes like [XDCC] or a number), or it may be offline.",
+            ),
+          );
+        }
         if (!first) {
           return failure(
             bridgeError(
@@ -1930,7 +2099,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
             bridgeError(
               "connect_failed",
               `mIRC is not connected to "${net.name}". Connect it first, or use ` +
-                "irc_ensure_connected.",
+                "irc_connect.",
             ),
           );
         }

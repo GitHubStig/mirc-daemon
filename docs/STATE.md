@@ -54,8 +54,7 @@ lines), this file, then `docs/adr/` (0010 and 0012 cover most recent work).
 **The user's mIRC right now:**
 
 - connected to EFnet as `` me `` (`cid 1`), in `#home!`;
-- a disconnected agent window for `irc.williamgattone.it` (`cid 1696`); `irc_ensure_connected`
-  reconnects it in place (TLS: pass `tls: true`);
+- no agent windows: the agent's test connections were disconnected and their windows closed;
 - `D:\Downloads\VoLtAgESoFT-LiNUX04\ubuntu-mate-16.04.4-desktop-amd64.iso` (complete, 1,746,124,800
   bytes), the test file; cutting it short (`SetLength`) and asking for pack #39 again is a quick
   resume test, and mIRC's get windows from those runs may still be open;
@@ -123,9 +122,10 @@ Proven by running it, with evidence in the log:
   and 16.
 - **The 29 tools**:
   - status: `daemon_status`, `irc_list_sessions`, `irc_get_state`;
-  - reading and waiting: `irc_read`, `irc_wait_for`, `irc_members`, `irc_ison`, `irc_whois`;
-  - connections: `irc_connect`, `irc_ensure_connected`, `irc_disconnect`, `irc_nick`,
-    `irc_close_windows`;
+  - reading and waiting: `irc_read`, `irc_history`, `irc_wait_for`, `irc_members`, `irc_ison`,
+    `irc_whois`;
+  - connections: `irc_connect` (which absorbed `irc_ensure_connected`), `irc_disconnect`,
+    `irc_nick`, `irc_close_windows`;
   - channels: `irc_join`, `irc_ensure_joined`, `irc_part`, `irc_topic`, `irc_mode`;
   - speaking: `irc_send`, `irc_notice`, `irc_notify`;
   - DCC and XDCC: `irc_dcc_status`, `irc_dcc_watch`, `xdcc_list`, `xdcc_search`,
@@ -376,6 +376,23 @@ Proven by running it, with evidence in the log:
 
   Reads and progress polls are not logged. The notes are best effort: never awaited, never failing
   what they describe.
+
+- **A real agent driving it** (2026-10-23). Plain requests from [docs/scenarios.md](scenarios.md)
+  were given to an agent that had only the MCP tools, with no hints, and graded from
+  `deno task report` (`scripts/session_report.ts`: every tool call, the `@bridge` lines, what was
+  said under the user's nick, and guard refusals, for a time window).
+  - **A local model in `pi` never got a call through.** It found the tools by `pi`'s tool search but
+    could not call one, and looped; nothing reached the daemon. That is between the model and `pi`.
+  - **Claude Haiku in Claude Code**, run from an empty folder so it could not read the source, took
+    two rounds. Findings and fixes are in scenarios.md. The largest was that Haiku picked
+    `irc_connect` over `irc_ensure_connected` and never checked state, which could have opened a
+    second connection to a network the user was on. The two tools are now one, which reuses by
+    network and closes a new connection again if it duplicates one.
+  - The others: `irc_read` names a channel that does not exist and says how far back it sees; the
+    new `irc_history` reads mIRC's own scrollback (`$line`); `irc_disconnect` says the window stays
+    and `irc_close_windows` closes it; `irc_history` says when its reply was capped; `xdcc_list`
+    ends at once on "no such nick"; a bot command typed into a channel warns that replies come
+    privately and points at `xdcc_search`.
 
 ## Not verified
 
