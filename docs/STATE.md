@@ -328,6 +328,11 @@ Proven by running it, with evidence in the log:
     `topicRead: true` lets a mere mention (a help channel) through.
   - Live: the join returned the topic in 896 ms (722 members), and `xdcc_fetch` stopped at
     `join_required` naming `#ARCHIVE-CHAT`, in 8 ms, with nothing sent to any bot.
+  - Live, the whole loop (Rizon `#FILES`, on the user's connection). Its topic puts a colour
+    code between `#` and the name (`^C10#^C0FILES-CHAT`), and stripping it finds `#FILES-CHAT`.
+    `xdcc_fetch` stopped at `join_required`. After `irc_ensure_joined #FILES-CHAT` (which the server
+    spelled `#files-chat`), the same call passed the topic check and stopped at
+    `bot_not_in_channel`. A made-up bot name was used, so nothing was requested.
 
 ## Not verified
 

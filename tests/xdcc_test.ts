@@ -31,6 +31,14 @@ Deno.test("channel names are found in a topic in any wording, and pack numbers a
     ),
     ["#ARCHIVE-XDCC", "#ARCHIVE-CHAT"],
   );
+  // Rizon, 2026-10-23, verbatim from the log: a colour code between "#" and the name.
+  assertEquals(
+    channelsIn(
+      "\x02\x03 :: \x0310#\x030FiLES :: Search: \x034ONLINE \x030::\x030 Join \x0310#\x030" +
+        "FILES-CHAT for S\x0310earch\x030, S\x0310ubscriptions\x030, and C\x0310hat\x030!",
+    ),
+    ["#FiLES", "#FILES-CHAT"],
+  );
   assertEquals(channelsIn("pack #39 is up, #39 again"), []);
   assertEquals(channelsIn("join #a, #A and #b."), ["#a", "#b"]);
   assertEquals(channelsIn(""), []);
