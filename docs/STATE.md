@@ -51,8 +51,8 @@ lines), this file, then `docs/adr/` (0010 and 0012 cover most recent work).
 **The user's mIRC right now:**
 
 - connected to EFnet as `` me `` (`cid 1`), in `#home!`;
-- the agent's connection to `irc.williamgattone.it` (`cid 105`, TLS), in `#HiGH-VoLtAgE`; the daemon
-  has restarted since, so it shows `openedByAgent: false` and needs `confirm: true` to close;
+- a disconnected agent window for `irc.williamgattone.it` (`cid 1696`); `irc_ensure_connected`
+  reconnects it in place (TLS: pass `tls: true`);
 - `D:\Downloads\VoLtAgESoFT-LiNUX04\ubuntu-mate-16.04.4-desktop-amd64.iso` (complete, 1,746,124,800
   bytes), the test file; cutting it short (`SetLength`) and asking for pack #39 again is a quick
   resume test, and mIRC's get windows from those runs may still be open;
@@ -263,12 +263,18 @@ Proven by running it, with evidence in the log:
   - `xdcc_fetch` had been ending its wait on the bot's unrecognised "sending you" line, 300 ms
     before the offer. It now waits up to 5 s more for the offer, and 2.5 s for a resume's `ACCEPT`.
 
+- **Closed windows and receipts** (2026-10-23). After `irc_disconnect {cid: 105, confirm: true}`,
+  the user closed the window. The next refresh dropped `cid 105`, and a fresh `irc_connect` to the
+  same server got **`cid 1696`**, marked `openedByAgent: true`. It was then closed without `confirm`
+  in 487 ms. mIRC does not reuse a closed window's id within a run, and the ids seen have only
+  grown, so a stale receipt cannot land on a later window of the user's. Closing a window raises no
+  event, so `irc_list_sessions` (which does not refresh) shows it until the next refresh, which
+  every acting tool does first.
+
 ## Not verified
 
 Assumed or untested. Treat these as the actual risk surface.
 
-- **Receipts dropped when the user closes an agent window**: unit-tested (`retainOnly` on refresh),
-  not yet seen live.
 - **Reconnecting a user's quit window** rejoins whatever channels were still open in it, if mIRC's
   rejoin option is on. That is expected, but not yet seen live.
 
@@ -424,8 +430,7 @@ minimised **`@bridge`** window, not the active channel. Available while debuggin
 ## Next, in order
 
 1. **Close the remaining live gaps** under "Not verified" when the chance arises: a bot's queue; a
-   real stall; the refused-join check, which needs someone holding a `+i` channel; receipts dropping
-   when the user closes an agent window (closing `cid 105` and calling `irc_get_state` checks it).
+   real stall; the refused-join check, which needs someone holding a `+i` channel.
 2. **Cleanup**: decide whether `--allow-raw` is needed; consider a daemon-side heartbeat so a dead
    link is noticed without waiting on TCP. `on *:CONNECTFAIL:` is documented as not firing, and a
    connect to a dead server still costs the full 60 s timeout. Find another signal if that matters.
