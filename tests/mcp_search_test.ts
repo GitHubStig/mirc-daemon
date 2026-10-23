@@ -237,3 +237,76 @@ Deno.test("xdcc_search says so when the topic does not show how to search", asyn
     await s.stop();
   }
 });
+
+// --- a services rename on the way ----------------------------------------------------
+
+/**
+ * A channel with a search, and NickServ's rename warning already on the
+ * connection. Returns when the search was said, once it is.
+ */
+async function renameComing(s: Awaited<ReturnType<typeof stack>>, warning: string) {
+  const said = { at: 0 };
+  s.fake.setHandler((cmd) => {
+    if (cmd.action === "msg") said.at = Date.now();
+    return cmd.action === "join"
+      ? { ok: true, data: { joined: "#chat", members: 600, topic: "Triggers: !search" } }
+      : undefined;
+  });
+  s.fake.emit("notice", { buf: "NickServ", nick: "NickServ", text: warning });
+  // Let the warning reach the daemon's log before the tool looks for it.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  return said;
+}
+
+Deno.test("xdcc_search waits for a pending services rename, and searches as the new nick", async () => {
+  // Live: the search went out as the registered nick, NickServ renamed the
+  // connection 5 s later, and the bot's answer had nowhere to go.
+  const s = await stack();
+  try {
+    const said = await renameComing(
+      s,
+      "If you do not change within 20 seconds, I will change your nick.",
+    );
+    let renamedAt = 0;
+    setTimeout(() => {
+      renamedAt = Date.now();
+      s.fake.emit("selfnick", { extra: { old: "me", new: "Guest4321" } });
+    }, 150);
+    const body = JSON.parse(textOf(
+      await s.client.callTool({
+        name: "xdcc_search",
+        arguments: { channel: "#chat", query: "q", timeoutMs: 500, quietMs: 100 },
+      }),
+    ));
+    assertEquals(renamedAt > 0, true);
+    assertEquals(said.at >= renamedAt, true, "searched before the rename");
+    assertEquals(body.renamed.includes("Guest4321"), true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("xdcc_search does not wait once NickServ says the nick is identified", async () => {
+  const s = await stack();
+  try {
+    await renameComing(s, "If you do not change within 20 seconds, I will change your nick.");
+    s.fake.emit("notice", {
+      buf: "NickServ",
+      nick: "NickServ",
+      text: "Password accepted - you are now recognized.",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const started = Date.now();
+    const body = JSON.parse(textOf(
+      await s.client.callTool({
+        name: "xdcc_search",
+        arguments: { channel: "#chat", query: "q", timeoutMs: 500, quietMs: 100 },
+      }),
+    ));
+    assertEquals(body.renamed, undefined);
+    // Searched straight away: only the search's own short wait, no 25 s rename wait.
+    assertEquals(Date.now() - started < 3000, true);
+  } finally {
+    await s.stop();
+  }
+});

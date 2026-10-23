@@ -256,6 +256,9 @@ const CONNECT_WAIT_MS = 50_000;
  */
 const SEARCH_SETTLE_MS = 10_000;
 
+/** Slack after NickServ's announced rename deadline before giving up on the rename. */
+const RENAME_MARGIN_MS = 5_000;
+
 /** Network services: their notices (a rename warning, logon news) are never a search's answer. */
 const SERVICES = new Set([
   "nickserv",
@@ -2088,6 +2091,57 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
       "name.";
   }
 
+  /**
+   * Wait out a services rename that is still to come on this connection, so a
+   * bot command goes out under the nick its answer will be sent to. Seen live
+   * (Rizon, 2026-10-23): connected under a registered nick, the agent searched
+   * 15 s in, NickServ renamed the connection to a Guest nick 5 s later, and the
+   * search bot, which answers minutes later and to the nick that asked, was
+   * never heard from. A rename is pending when NickServ's last word on this
+   * connection was "change within N seconds", with no rename since and no
+   * "identified". Waits until N seconds after that warning, plus a margin.
+   * Returns the rename, if one happened while waiting.
+   */
+  async function awaitRename(
+    s: Session,
+    cid: number,
+  ): Promise<{ from: string; to: string } | undefined> {
+    let due: number | undefined;
+    for (const e of s.log.snapshot()) {
+      if (e.cid !== cid) continue;
+      if (e.kind === "selfnick") due = undefined;
+      else if (e.kind === "notice" && (e.nick ?? "").toLowerCase() === "nickserv") {
+        const text = plainText(e.text ?? "");
+        const within = /within (\d+) seconds?/i.exec(text);
+        if (within) due = e.ts + Number(within[1]) * 1000;
+        else if (/identified|password accepted/i.test(text)) due = undefined;
+      }
+    }
+    if (due === undefined) return undefined;
+    const waitMs = due + RENAME_MARGIN_MS - Date.now();
+    if (waitMs <= 0) return undefined;
+    const event = await waitForEvent({
+      log: s.log,
+      bus: s.bus,
+      signal: s.closed,
+      matcher: { kind: "selfnick", cid },
+      since: s.log.cursor,
+      timeoutMs: waitMs,
+    });
+    if (!event) return undefined;
+    const from = String(event.extra?.old ?? "");
+    const to = String(event.extra?.new ?? "");
+    s.note(`waited for services to rename ${from} to ${to} before asking a bot`);
+    return { from, to };
+  }
+
+  /** What the agent should tell the user about a rename it waited for. */
+  function renameNote(r: { from: string; to: string }): string {
+    return `Services renamed this connection from ${r.from} to ${r.to} (the nick is ` +
+      "registered and was not identified), so the request waited for that and went out as " +
+      `${r.to}, the nick replies will come to. Tell the user.`;
+  }
+
   /** Refuse a channel mIRC is alone in: nobody there can answer a bot command. */
   async function refuseEmpty(
     s: Session,
@@ -2184,6 +2238,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     },
     ({ session, network, cid, channel, query, trigger, timeoutMs, quietMs }: XdccSearchArgs) =>
       guarded(async () => {
+        const started = Date.now();
         const s = sessionOf(registry, session);
         const net = await targetOf(s, network, stateFreshnessMs, cid);
         // Joined or not, the reply carries the topic, which lists the triggers.
@@ -2234,6 +2289,8 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           await new Promise((resolve) => setTimeout(resolve, settle));
           if (s.closed.aborted) return linkDropped();
         }
+        const renamed = await awaitRename(s, net.cid);
+        if (s.closed.aborted) return linkDropped();
 
         const cursor = s.log.cursor;
         const said = command + " " + query;
@@ -2245,16 +2302,21 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         if (!sent.ok) return failure(sent.error);
         s.note("searched in " + channel + ": " + said);
 
+        // The pause and any rename wait come out of the call's own budget.
         const collected = await collectSearch(
           s,
           net.cid,
           channel,
           cursor,
-          Math.max(1000, (timeoutMs ?? 50_000) - settle),
+          Math.max(1000, (timeoutMs ?? 50_000) - (Date.now() - started)),
           quietMs ?? 3000,
         );
         if (!collected) return linkDropped();
-        return searchReport(channel, cursor, collected, { query, trigger: command });
+        return searchReport(channel, cursor, collected, {
+          query,
+          trigger: command,
+          ...(renamed ? { renamed: renameNote(renamed) } : {}),
+        });
       }),
   );
 
@@ -2303,6 +2365,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         XdccFetchArgs,
     ) =>
       guarded(async () => {
+        const started = Date.now();
         const s = sessionOf(registry, session);
         const steps: string[] = [];
         const waitMs = timeoutMs ?? 50_000;
@@ -2412,6 +2475,12 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
 
         // 4. open the job *before* sending, so an instant reply already has a job
         //    to land on. From here the job follows the bot on its own.
+        // A bot answers, and offers the file, to the nick that asked: wait out a
+        // services rename first, or both go to a nick that no longer exists.
+        const renamed = await awaitRename(s, net.cid);
+        if (s.closed.aborted) return linkDropped();
+        if (renamed) steps.push(`waited for services to rename ${renamed.from} to ${renamed.to}`);
+
         const job = s.dcc.start({ cid: net.cid, net: net.name, bot, pack });
 
         const sent = await s.commands.send(
@@ -2423,13 +2492,14 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         s.note(`asked ${bot} on ${net.name} for pack #${pack.replace(/^#/, "")}`);
         steps.push("requested");
 
-        // 5. wait, briefly, for the bot to answer or the offer to arrive.
-        const deadline = Date.now() + waitMs;
+        // 5. wait, briefly, for the bot to answer or the offer to arrive. Any
+        //    rename wait came out of the same budget, to stay inside the client's.
+        const deadline = Math.max(started + waitMs, Date.now() + 1000);
         await waitForJob(
           s,
           job,
           (j) => j.state !== "requested" || j.lastReply !== undefined,
-          waitMs,
+          deadline - Date.now(),
         );
         if (s.closed.aborted) return linkDropped();
         // Bots announce before they offer, and the offer is what names the file.

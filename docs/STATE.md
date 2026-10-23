@@ -390,22 +390,9 @@ Proven by running it, with evidence in the log:
 - **A real agent driving it** (2026-10-23). Plain requests from [docs/scenarios.md](scenarios.md)
   were given to an agent that had only the MCP tools, with no hints, and graded from
   `deno task report` (`scripts/session_report.ts`: every tool call, the `@bridge` lines, what was
-  said under the user's nick, and guard refusals, for a time window).
-  - **A local model in `pi`**, a much weaker model than Haiku. In `pi`'s default `codemod` mode it
-    never got a call through; in `direct` mode it does. Scenario 1 passes, including the empty
-    scrollback line (trap 18), confirmed live. Scenario 2 looped on joining the channel, which led
-    to merging the near-duplicate tools (see "The tools" above); after that, 2 and 3 pass. Round 2
-    led to `irc_cleanup` and to search answers that say to collect at once (scenarios.md).
-  - **Claude Haiku in Claude Code**, run from an empty folder so it could not read the source, took
-    three rounds to pass every scenario. Findings and fixes are in scenarios.md. The largest was
-    that Haiku picked `irc_connect` over `irc_ensure_connected` and never checked state, which could
-    have opened a second connection to a network the user was on. The two tools are now one, which
-    reuses by network and closes a new connection again if it duplicates one.
-  - The others: `irc_read` names a channel that does not exist and says how far back it sees; the
-    new `irc_history` reads mIRC's own scrollback (`$line`); `irc_disconnect` now closes the agent's
-    window itself; `irc_history` says when its reply was capped; `xdcc_list` ends at once on "no
-    such nick"; a bot command typed into a channel warns that replies come privately and points at
-    `xdcc_search`.
+  said under the user's nick, and guard refusals, for a time window). Where each model stands, and
+  the rules the runs taught about writing tools, are at the end of scenarios.md; each round's
+  details are in the commit that fixed it.
 
 ## Not verified
 
@@ -582,12 +569,11 @@ minimised **`@bridge`** window, not the active channel. Available while debuggin
 
 ## Next, in order
 
-0. **Every scenario passing under `pi`** (direct mode, the local model). Haiku passes them all after
-   three rounds; `pi`'s model is much weaker, so it shows vague descriptions and unhelpful answers
-   that Haiku gets past. Round 2 passed 1 to 3 and failed 4 (ended its turn while a search was
-   pending) and 5 (no call at all); both are addressed. Next, rerun 4 and 5, then all of them, each
-   in a fresh `pi` session, and record each round in scenarios.md. Fix in the tool descriptions and
-   answers, never by hinting in the request.
+0. **Every scenario passing under a small local model in `pi`** (direct mode). A weak model shows
+   vague descriptions and unhelpful answers that Haiku gets past. Next: rerun 4 on Gemma, to see the
+   bot answer now that bot tools wait out a services rename; then run all seven on ornith-1.5:9b,
+   each in a fresh session. Update "Where each model stands" in scenarios.md. Fix in the tool
+   descriptions and answers, never by hinting in the request.
 1. **Close the remaining live gaps when they happen**: a bot's queue, and a real stall. Neither can
    be found on demand. When the user reports one, read the log for that window: every bot reply, DCC
    event and 15 s progress poll is in it. A stall can also be staged: the user's mIRC sends itself
