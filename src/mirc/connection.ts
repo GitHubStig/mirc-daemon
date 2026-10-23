@@ -246,6 +246,10 @@ export async function handleMircConnection(
           frame = parseInbound(line);
         } catch (err) {
           connectionLog.warn("mbp.bad-frame", { error: (err as Error).message });
+          // A reply that does not parse still names its command near the start,
+          // and bridge.mrc writes every reply as {"t":"res","id":"cN",...}.
+          const id = /^\{"t":"res","id":"(c\d+)"/.exec(line)?.[1];
+          if (id) session?.commands.rejectUnreadable(id, (err as Error).message);
           continue;
         }
         onFrame(frame as InboundFrame);

@@ -275,6 +275,31 @@ export class CommandDispatcher {
     entry.resolve(outcome);
   }
 
+  /**
+   * A reply arrived for `id` but could not be read. Fail that command now
+   * instead of letting it wait out its timeout: a broken reply is a bug in
+   * bridge.mrc, and "mIRC did not answer" would send the agent looking in the
+   * wrong place. Seen live: an empty scrollback line broke irc_history's reply.
+   */
+  rejectUnreadable(id: string, detail: string): void {
+    const entry = this.#pending.get(id);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    if (entry.probe !== undefined) clearTimeout(entry.probe);
+    this.#pending.delete(id);
+    entry.gate.release();
+    this.#log?.warn("action.outcome", { id, action: entry.action, code: "unreadable-reply" });
+    entry.resolve({
+      ok: false,
+      error: bridgeError(
+        "server_error",
+        `mIRC answered the "${entry.action}" command, but its reply could not be read: a bug ` +
+          "in bridge.mrc, not something to retry. The daemon log has the reply.",
+        { detail },
+      ),
+    });
+  }
+
   /** Fail everything in flight; used when the mIRC socket drops. */
   close(reason: string): void {
     this.#closed = true;

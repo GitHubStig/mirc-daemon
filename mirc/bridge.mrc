@@ -83,7 +83,15 @@ alias -l bridge_note {
 ; characters, and JSON.parse rejects them raw. Missing this made every coloured
 ; line -- which is most XDCC bot output -- unparseable and silently dropped.
 ; The loop only runs when the regex says there is something to escape.
-alias -l jstr {
+alias -l jstr { return $chr(34) $+ $jesc($1-) $+ $chr(34) }
+
+; The inside of a JSON string, without its quotes. Separate from jstr because a
+; variable holding exactly "" (two quote characters) came back empty in mIRC
+; 7.85: an empty scrollback line stored as "" turned into nothing, and
+; irc_history's reply got ",," and was invalid JSON (seen live, 2026-10-23).
+; Callers that must keep a value in a variable keep it unquoted, and add the
+; quotes as they concatenate.
+alias -l jesc {
   var %s = $replace($1-, $chr(92), $chr(92) $+ $chr(92))
   %s = $replace(%s, $chr(34), $chr(92) $+ $chr(34))
   %s = $replace(%s, $chr(10), $chr(92) $+ n)
@@ -96,7 +104,7 @@ alias -l jstr {
       inc %i
     }
   }
-  return $chr(34) $+ %s $+ $chr(34)
+  return %s
 }
 
 ; "key":value  -- the value must already be JSON, passed as an identifier result
@@ -509,15 +517,17 @@ alias -l bridge_do_history {
   if ($4 > 0) %last = $calc($4 - 1)
   var %first = $calc(%last - $3 + 1)
   if (%first < 1) %first = 1
+  ; Each element goes in as ,"text": the quotes are added here rather than
+  ; held in a variable (see jesc), and the leading comma is dropped at the end.
+  ; A window's empty lines are why: they must arrive as "", not vanish.
   var %out, %i = %last
   while (%i >= %first) {
-    var %l = $jstr($line($2, %i))
-    if ($calc($len(%out) + $len(%l)) > 2600) break
-    if (%out == $null) %out = %l
-    else %out = %l $+ $chr(44) $+ %out
+    var %t = $jesc($line($2, %i))
+    if ($calc($len(%out) + $len(%t) + 3) > 2600) break
+    %out = $chr(44) $+ $chr(34) $+ %t $+ $chr(34) $+ %out
     dec %i
   }
-  bridge_ok $1 $kvo(total, %total) $+ $chr(44) $+ $kvo(from, $calc(%i + 1)) $+ $chr(44) $+ $kvo(lines, $chr(91) $+ %out $+ $chr(93))
+  bridge_ok $1 $kvo(total, %total) $+ $chr(44) $+ $kvo(from, $calc(%i + 1)) $+ $chr(44) $+ $kvo(lines, $chr(91) $+ $mid(%out, 2) $+ $chr(93))
 }
 
 alias -l bridge_do_join {

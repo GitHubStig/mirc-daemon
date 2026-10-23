@@ -965,6 +965,22 @@ Deno.test("a bot command sent into a channel comes back with where to look for t
   }
 });
 
+Deno.test("a session that does not exist says so, and to leave it out", async () => {
+  // A real agent passed a connection's cid as the session.
+  const s = await stack();
+  try {
+    const result = await s.client.callTool({
+      name: "irc_history",
+      arguments: { session: "1", window: "#chan" },
+    });
+    const text = textOf(result);
+    assertEquals(text.includes('there is no mIRC client "1"'), true);
+    assertEquals(text.includes("leave session out"), true);
+  } finally {
+    await s.stop();
+  }
+});
+
 Deno.test("irc_disconnect says the window stays and how to close it", async () => {
   const s = await stack();
   try {

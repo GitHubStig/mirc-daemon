@@ -252,6 +252,46 @@ Deno.test("a join reply carrying members, and one carrying a numeric, are both r
   }
 });
 
+Deno.test("a reply that is not valid JSON fails its command at once, not by timeout", async () => {
+  // The frame irc_history really got (2026-10-23): an empty scrollback line
+  // became nothing at all, leaving ",," in the list.
+  const h = await attach();
+  try {
+    const session = h.session()!;
+    const started = Date.now();
+    const asked = session.commands.send("history", { window: "#home!", lines: 50 });
+    const cmd = await h.mirc.nextCommand("history");
+    h.mirc.sendLine(
+      `{"t":"res","id":"${cmd.id}","ok":true,"data":{"total":3,"from":1,"lines":` +
+        `["[15:51] * Set by x on Sun Aug 02 19:17:51 2026",,"[16:57] <a> hi"]}}`,
+    );
+    const outcome = await asked;
+    assertEquals(outcome.ok, false);
+    if (!outcome.ok) assertEquals(outcome.error.hint.includes("could not be read"), true);
+    assertEquals(Date.now() - started < 900, true);
+  } finally {
+    await h.stop();
+  }
+});
+
+Deno.test("a history reply with an empty line, as bridge_do_history now sends it, parses", async () => {
+  const h = await attach();
+  try {
+    const session = h.session()!;
+    const asked = session.commands.send("history", { window: "#home!", lines: 50 });
+    const cmd = await h.mirc.nextCommand("history");
+    h.mirc.sendLine(
+      `{"t":"res","id":"${cmd.id}","ok":true,"data":{"total":3,"from":1,"lines":` +
+        `[${mslJstr("[15:51] * Set by x")},"",${mslJstr("[16:57] <a> \x02hi\x02")}]}}`,
+    );
+    const outcome = await asked;
+    assertEquals(outcome.ok, true);
+    if (outcome.ok) assertEquals((outcome.data?.lines as string[])[1], "");
+  } finally {
+    await h.stop();
+  }
+});
+
 Deno.test("the dropped-events notice bridge_send builds is recorded with its count", async () => {
   const h = await attach();
   try {

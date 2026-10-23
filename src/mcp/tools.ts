@@ -128,11 +128,26 @@ function sessionOf(registry: SessionRegistry, id?: string): Session {
       ),
     );
   }
+  const ids = all.map((s) => s.id).join(", ");
+  // A session that does not exist is a different mistake from leaving it out.
+  // Seen with a real agent: it passed a connection's cid ("1") as the session,
+  // was told to "pass session", and went round in circles.
+  if (id !== undefined) {
+    throw new BridgeFailure(
+      bridgeError(
+        "server_error",
+        `there is no mIRC client "${id}". ` +
+          (all.length === 1
+            ? `Only one is attached (${ids}), so leave session out.`
+            : `Attached: ${ids}; pass one of those, or ask the user which.`) +
+          " A session is a whole mIRC client, not a connection: for a connection use cid.",
+      ),
+    );
+  }
   throw new BridgeFailure(
     bridgeError(
       "server_error",
-      `${all.length} mIRC clients are attached (${all.map((s) => s.id).join(", ")}); ` +
-        "pass `session` to say which one.",
+      `${all.length} mIRC clients are attached (${ids}); pass session to say which one.`,
     ),
   );
 }
@@ -360,7 +375,10 @@ function acceptance(session: Session): string {
 const sessionArg = z
   .string()
   .optional()
-  .describe("Which attached mIRC client; omit when only one is.");
+  .describe(
+    "Leave this out. Only needed when several mIRC clients are attached, which is rare; then " +
+      'it is a client id like "s1" from irc_list_sessions. Not a connection: that is cid.',
+  );
 const networkArg = z
   .string()
   .optional()

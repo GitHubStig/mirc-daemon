@@ -508,6 +508,13 @@ Not silent, but the same lesson, that the test double never sends what real IRC 
     user's status window. Bulk numerics (353, 352, 322, 367) are no longer mirrored. Events back off
     while the queue is over 12 KB, and a `dropped` event with the count follows once there is room.
     Replies are never dropped. After the fix, the same join produced no errors and nothing dropped.
+18. **A variable holding exactly `""` comes back empty** (inferred from a live failure, not proven
+    in isolation). `irc_history` stored each line as `jstr`'s output, and an empty scrollback line
+    is `""`. In the reply it became nothing, so the list read `,,` and the whole reply was invalid
+    JSON. A fix that set the variable to `""` failed the same way. The same `""` passed straight
+    into a concatenation (a join reply with no topic) is fine. So `jesc` escapes without quotes, and
+    anything kept in a variable stays unquoted until it is concatenated. Since then, a reply that
+    does not parse fails its command at once ("could not be read"), instead of timing out.
 
 ## Running it
 
@@ -562,6 +569,12 @@ minimised **`@bridge`** window, not the active channel. Available while debuggin
 
 ## Next, in order
 
+0. **First, next session**: confirm trap 18's fix live. Reload `bridge.mrc` if mIRC has not, then
+   rerun scenario 1 in `pi` (direct mode) and check `irc_history` on `#home!` returns its empty
+   line as `""` rather than "could not be read". If it still breaks, the raw reply is in the log as
+   an `mbp.in` line just before the `mbp.bad-frame` warning. Then decide with the user whether to
+   push as is (private repo) or scrub the history first; nothing has been pushed since
+   `origin/main`.
 1. **Close the remaining live gaps when they happen**: a bot's queue, and a real stall. Neither can
    be found on demand. When the user reports one, read the log for that window: every bot reply, DCC
    event and 15 s progress poll is in it. A stall can also be staged: the user's mIRC sends itself

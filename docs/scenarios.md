@@ -153,3 +153,14 @@ Every round-1 fix showed up in use: `irc_history` for the read, `irc_connect` wi
   already there.
 - **Scenario 7, history**, fresh session: passed. `irc_history`, an accurate summary, and this time
   it said it had read only the newest 48 lines, and offered to page back.
+
+### `pi` with a local model, 2026-10-23
+
+`pi`'s MCP has an exposure mode. The default, `codemod`, has the model write JavaScript to call the
+tools; the local model hallucinated calls and looped, and nothing reached the daemon. With `direct`
+(each tool offered as an ordinary tool) it works.
+
+- **Scenario 1, read**: passed, through `irc_history`, after a detour. The model passed a
+  connection's `cid` as `session` ("1"), and the error said to "pass session", which it had; it went
+  round in circles until it guessed "s1". Fixed: an unknown session says it does not exist and to
+  leave session out, and the argument's description says the same, and that a session is not a cid.
