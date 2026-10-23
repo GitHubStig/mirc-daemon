@@ -467,7 +467,8 @@ const connectSchema = z.object({
     .optional()
     .describe(
       "Network name, e.g. EFnet or Rizon, matched case-insensitively. Pass it whenever you " +
-        "know it: it is what lets a connection the user already has be reused.",
+        "know it: it is what lets a connection the user already has be reused. A network in " +
+        "mIRC's server list needs no server: mIRC picks one.",
     ),
   server: z
     .string()
@@ -1163,6 +1164,24 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           const existing = existingConnection(s, server, network);
           if (existing) {
             return json({ skipped: true, reason: "already connected", network: existing });
+          }
+        }
+        if (!server && network) {
+          // mIRC's /server takes a network name from its own server list and
+          // picks a server itself, but retries a name it does not know as a
+          // hostname, forever and silently. So ask first. An older bridge.mrc
+          // without the query answers with a failure: then nothing changes.
+          const known = await s.commands.send("netknown", { network });
+          if (known.ok && known.data?.known === true) server = network;
+          else if (known.ok) {
+            return failure(
+              bridgeError(
+                "unknown_network",
+                `mIRC is not on "${network}", and its server list has no network by that ` +
+                  "name. Pass server (the address, e.g. irc.example.net, and tls if it needs " +
+                  "it), or check the network name.",
+              ),
+            );
           }
         }
         if (!server) {

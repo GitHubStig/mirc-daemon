@@ -244,6 +244,8 @@ export type ActionName =
   | "gets"
   /** Close every disconnected connection window (mIRC's /close -it). */
   | "closewin"
+  /** Whether mIRC's server list has a network (group) by this name. */
+  | "netknown"
   /** MODE <target> [modes]; without modes it asks for the current ones (324). */
   | "mode"
   /** Read a channel's topic from mIRC, or set it with `text`. */

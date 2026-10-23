@@ -367,6 +367,7 @@ alias -l bridge_command {
   ; A cid on connect means "reconnect that window" (already selected above).
   if (%act == connect) { bridge_do_connect %id $jparam(%f, server) $iif($jnum(%f, port), $v1, 0) $iif(%cid != $null, 1, 0) $iif($jnum(%f, tls), 1, 0) $jparam(%f, password) | return }
   if (%act == raw) { bridge_do_raw %id $jparam(%f, line) | return }
+  if (%act == netknown) { bridge_do_netknown %id $jparam(%f, network) | return }
   if (%act == nick) { bridge_do_nick %id $jparam(%f, nick) | return }
   if (%act == disconnect) { bridge_do_disconnect %id $jparam(%f, message) | return }
   if (%act == dccstop) { bridge_do_dccstop %id $jparam(%f, nick) | return }
@@ -650,6 +651,21 @@ alias -l bridge_do_connect {
   set -e %bridge_conn_id $1
   set -e %bridge_conn_cid %new
   .timerbridgeconnwatch 0 2 bridge_conn_watch
+}
+
+; $1 = id, $2 = a network name. Whether mIRC's server list has a group by that
+; name. /server accepts a group name and picks one of its servers itself (seen
+; live, mIRC 7.85, 2026-10-23: "Rizon" and "rizon" both connected), but a name
+; it does not know is taken for a hostname and retried forever, with no event.
+; So the daemon asks first. == in mSL ignores case, as /server does.
+alias -l bridge_do_netknown {
+  if ($2 == $null) { bridge_fail $1 0 missing-network | return }
+  var %i = 1, %found = false
+  while (%i <= $server(0)) {
+    if ($server(%i).group == $2) { %found = true | break }
+    inc %i
+  }
+  bridge_ok $1 $kvo(known, %found) $+ $chr(44) $+ $kvo(servers, $server(0))
 }
 
 ; While a connect is pending, look at its connection every 2 s, to answer at

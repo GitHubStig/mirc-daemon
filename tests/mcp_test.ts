@@ -932,6 +932,57 @@ Deno.test("irc_connect takes a host passed as network for the server", async () 
   }
 });
 
+Deno.test("irc_connect by network name alone, when mIRC's server list has it", async () => {
+  const s = await stack();
+  try {
+    s.fake.setHandler((cmd, fake) => {
+      if (cmd.action === "netknown") {
+        return { ok: true, data: { known: cmd.params?.network === "Rizon", servers: 40 } };
+      }
+      if (cmd.action !== "connect") return undefined;
+      fake.setNetworks([
+        network(),
+        network({ cid: 7, name: "Rizon", server: "irc.rizon.net", channels: [], members: {} }),
+      ]);
+      return { ok: true, data: { cid: 7 } };
+    });
+
+    const known = await s.client.callTool({ name: "irc_connect", arguments: { network: "Rizon" } });
+    assertEquals(known.isError ?? false, false);
+    // The name goes to mIRC as it is: /server picks a server from the group.
+    assertEquals(s.fake.received.find((c) => c.action === "connect")?.params?.server, "Rizon");
+
+    const unknown = await s.client.callTool({
+      name: "irc_connect",
+      arguments: { network: "NoSuchNet" },
+    });
+    assertEquals(textOf(unknown).startsWith("unknown_network:"), true);
+    assertEquals(textOf(unknown).includes("server list has no network"), true);
+    assertEquals(s.fake.received.filter((c) => c.action === "connect").length, 1);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("irc_connect by name with an older bridge.mrc still asks for a server", async () => {
+  const s = await stack();
+  try {
+    s.fake.setHandler((cmd) =>
+      cmd.action === "netknown"
+        ? { ok: false, numeric: 0, err: "unknown-action-netknown" }
+        : undefined
+    );
+    const result = await s.client.callTool({
+      name: "irc_connect",
+      arguments: { network: "Rizon" },
+    });
+    assertEquals(textOf(result).includes("no server was given"), true);
+    assertEquals(s.fake.received.some((c) => c.action === "connect"), false);
+  } finally {
+    await s.stop();
+  }
+});
+
 /** A raw reply as bridge.mrc mirrors it. */
 function emitRaw(s: Stack, line: string): void {
   s.fake.emit("raw", { raw: line, extra: { numeric: Number(line.split(" ")[0]) } });

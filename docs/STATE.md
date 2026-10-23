@@ -39,8 +39,8 @@ lines), this file, then `docs/adr/` (0010 and 0012 cover most recent work).
   edits.
 - **Request the pack straight away, then tell the user what is coming.** Users go straight to
   `xdcc send`, never `xdcc info`, so the agent does too. As soon as the bot's offer names the file
-  and size, tell the user, and cancel with `xdcc_cancel` if it is not what they wanted.
-  Self-send (below) also tests DCC with no bot.
+  and size, tell the user, and cancel with `xdcc_cancel` if it is not what they wanted. Self-send
+  (below) also tests DCC with no bot.
 - **Nothing sent to IRC may mark the traffic as automated.** No agent nick, and mIRC's own default
   quit message unless the user gives one.
 - **At most one agent connection per network the user is on.** More connections from one host risk a
@@ -334,6 +334,16 @@ Proven by running it, with evidence in the log:
     `xdcc_fetch` stopped at `join_required`. After joining `#FILES-CHAT` (which the server spelled
     `#files-chat`), the same call passed the topic check and stopped at `bot_not_in_channel`. A
     made-up bot name was used, so nothing was requested.
+
+- **Connecting by network name** (2026-10-23). mIRC's `/server -m` takes a network name from its own
+  server list and picks one of that network's servers itself: `Rizon` reached `solenoid.rizon.net`
+  in 4.3 s, and `rizon` reached `irc.losslessone.com`, so case does not matter. But a name it does
+  not know is taken for a hostname and retried forever, with no event; the daemon only gave up at 50
+  s, saying that was often normal. So `irc_connect {network}` with no server first asks `bridge.mrc`
+  (`netknown`, which reads `$server(N).group`) whether the list has that network. Live:
+  `NoSuchNetXyz` failed at once with `unknown_network` (22 ms), and `rizon` was found among 132
+  listed servers and connected. No alias list is kept anywhere: the user's own mIRC server list is
+  the source.
 
 - **A slow connect no longer holds everything up** (2026-10-23). Commands run in lanes (see
   `src/core/commands.ts`). The ones `bridge.mrc` answers on the spot share one. Those answered only

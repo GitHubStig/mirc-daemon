@@ -625,6 +625,22 @@ Deno.test("the gets reply bridge_getspayload builds moves a transfer to download
   }
 });
 
+Deno.test("the netknown reply bridge_do_netknown builds reads as a boolean", async () => {
+  const h = await attach();
+  try {
+    const asked = h.session()!.commands.send("netknown", { network: "Rizon" });
+    const cmd = await h.mirc.nextCommand("netknown");
+    // Strings travel base64-encoded; $jparam decodes them in mIRC.
+    assertEquals(atob(String((cmd.params as Record<string, unknown>).network)), "Rizon");
+    // Exactly as the mSL builds it: %found is the bare word true or false.
+    h.mirc.sendLine(`{"t":"res","id":"${cmd.id}","ok":true,"data":{"known":true,"servers":40}}`);
+    const outcome = await asked;
+    assertEquals(outcome.ok && outcome.data?.known, true);
+  } finally {
+    await h.stop();
+  }
+});
+
 Deno.test("the gets frame mIRC really sent: empty nicks, a finished window listed first", async () => {
   // Verbatim from the log, 2026-10-23, from the first script version, which read
   // $get(N).nick (empty in mIRC 7.85) and .done (0 even for the finished one).
