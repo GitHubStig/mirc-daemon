@@ -180,6 +180,7 @@ alias bridge.diag {
   bridge_say hello = $bridge_helloframe(***)
   bridge_say last-in = $iif(%bridge_last, %bridge_last, nothing received yet)
   bridge_say conns = $bridge_connspayload
+  bridge_say gets = $bridge_getspayload
   ; Self-test for the inbound reader, using the same builders as a real frame.
   var %probe = $chr(123) $+ $kvo(t, $jstr(cmd)) $+ $chr(44) $+ $kvo(id, $jstr(c1)) $+ $chr(44) $+ $kvo(action, $jstr(conns)) $+ $chr(125)
   bridge_say jval-test t= $+ $jval(%probe, t) $+ id= $+ $jval(%probe, id) $+ action= $+ $jval(%probe, action)
@@ -333,6 +334,7 @@ alias -l bridge_command {
   if (%act == nick) { bridge_do_nick %id $jparam(%f, nick) | return }
   if (%act == disconnect) { bridge_do_disconnect %id $jparam(%f, message) | return }
   if (%act == dccstop) { bridge_do_dccstop %id $jparam(%f, nick) | return }
+  if (%act == gets) { bridge_ok %id $bridge_getspayload | return }
   bridge_fail %id 0 unknown-action-$+(%act)
 }
 
@@ -619,6 +621,31 @@ alias -l bridge_do_dccstop {
   bridge_ok $1
 }
 
+; mIRC's open downloads, one object each, for the daemon to follow progress
+; and notice a stall: mIRC raises no event for a transfer that stops sending
+; without the connection breaking, so the daemon asks. A lookup and nothing
+; more; deciding what counts as a stall is the daemon's job.
+; Numbers go through bridge_number: a property this mIRC lacks is $null, and
+; "rcvd": with nothing after it is not JSON. $nopath because the daemon knows
+; the file by name. Stops at ~2800 characters to stay under the frame limit.
+; The payload is separate from the reply so the diagnostic can show it.
+; Verified live (mIRC 7.85, 2026-10-23): $get(N) itself is the sender's nick;
+; $get(N).nick is empty. .rcvd counts from the start of the file, so a resume
+; starts high. .done stayed 0 for a finished get, so it is not sent: the daemon
+; takes rcvd = size as done. A finished get's window stays listed until closed.
+alias -l bridge_getspayload {
+  var %out, %i = 1
+  while (%i <= $get(0)) {
+    if ($len(%out) > 2800) break
+    if (%i > 1) %out = %out $+ $chr(44)
+    %out = %out $+ $chr(123) $+ $kvo(nick, $jstr($get(%i))) $+ $chr(44) $+ $kvo(file, $jstr($nopath($get(%i).file))) $+ $chr(44) $+ $kvo(size, $bridge_number($get(%i).size)) $+ $chr(44) $+ $kvo(rcvd, $bridge_number($get(%i).rcvd)) $+ $chr(44) $+ $kvo(cps, $bridge_number($get(%i).cps)) $+ $chr(125)
+    inc %i
+  }
+  return $kvo(gets, $chr(91) $+ %out $+ $chr(93))
+}
+
+alias -l bridge_number { return $iif($1 isnum, $1, 0) }
+
 alias -l bridge_do_raw {
   if (!$2-) { bridge_fail $1 0 missing-line | return }
   raw $2-
@@ -827,9 +854,9 @@ on *:TOPIC:#: {
   bridge_send $evp(topic) $+ $chr(44) $+ $kvo(buf, $jstr($chan)) $+ $chr(44) $+ $kvo(nick, $jstr($nick)) $+ $chr(44) $+ $kvo(text, $jstr($1-)) $+ $chr(125)
 }
 
-; --- DCC outcomes only ----------------------------------------------------
-; Progress is deliberately not reported: mIRC already shows it, and the daemon
-; only needs to know whether a transfer finished or stopped.
+; --- DCC outcomes ---------------------------------------------------------
+; Only the outcomes are events. Progress is not pushed: the daemon polls it
+; with the gets command while a transfer runs (ADR-0010).
 ; Verified live (2026-10-22): $filename is the FULL saved path, $nick the sender,
 ; and $cid the connection the transfer came in on. mIRC gives no failure reason.
 ;

@@ -1,6 +1,7 @@
 # 0010. Relay DCC outcomes, not progress
 
-**Status:** accepted
+**Status:** accepted; amended twice. The 2026-10-23 amendment adds polled progress, so read the
+title as the original decision.
 
 ## Context
 
@@ -67,13 +68,51 @@ setting (`$sreq`). With _ignore_, `xdcc_fetch` refuses before asking the bot. Wi
 guidance tells the agent that the user must accept the file in mIRC. With _auto_ (the user's
 setting), the transfer starts by itself.
 
+## Amendment: progress is polled, and asking again is a resume (2026-10-23)
+
+The first complete transfer from a real bot (irc.williamgattone.it, pack #39, a 1.6 GB Ubuntu image)
+went from _offered_ to _complete_ with nothing in between for 14 minutes. An agent could not tell a
+slow transfer from a hung one, and a hung one may never produce `GETFAIL`.
+
+**The premise above was wrong.** mIRC _can_ be asked about a transfer in progress: `$get(N)` gives
+each open download's sender, file, size, bytes received and rate. No filesystem watching is needed,
+so the reason for relaying no progress is gone. The decision changes to:
+
+- **The daemon polls; mIRC answers.** A `gets` command returns mIRC's open downloads, one small
+  object each. mSL stays a lookup. The session polls every 15 s, and only while a job is _offered_,
+  _downloading_ or _stalled_. A script without `gets` fails the command, and the job simply shows no
+  progress, as before.
+- **Two new states.** Bytes growing move a job to _downloading_, with `rcvd` and `cps` on the job.
+  No growth for 60 s makes it _stalled_, and growth again makes it _downloading_. _Stalled_ is the
+  liveness check the earlier consequence asked for, done in the daemon rather than in mSL. Its
+  advice is to cancel and ask again.
+- **Asking again is how a broken transfer resumes.** mIRC is set to resume when the file exists. It
+  sends `DCC RESUME`, and the bot answers `DCC ACCEPT <file> <port> <position>`. The daemon records
+  that position as `resumedFrom`. Seen live: cancelled at about 600 MB, asked again, resumed at
+  629,740,868, and completed with the file at full size. For a file already complete, mIRC resumes 8
+  KB short of the end, so the transfer is over in a second. The tool then says "already had this",
+  not "starting".
+- **Asking again for a pack still in progress is a mistake, and is caught.** The bot answers
+  "already requested" in its own words. This one answered in Italian ("Hai già richiesto questo
+  pack!"), which the classifier did not know, so the second job sat in _requested_ forever. It would
+  also have taken the first job's outcome, since outcomes go to the newest active job from that bot.
+  `xdcc_fetch` now returns the existing job, and sends nothing, when an active job has the same bot,
+  pack and connection. An ended job does not block a new request, since that is the resume path. The
+  rule rests on the job's state, not on the bot's language.
+- **A bot's re-offer continues the job.** When mIRC's connect to the bot failed, the bot offered the
+  same file again by itself. A same-file offer from that bot within two minutes of a failure now
+  reopens the failed job, instead of opening a job nobody requested.
+- **`xdcc_fetch` waits a little past what it cannot read.** The bot's "sending you" line came about
+  300 ms before the offer. Unrecognised, it ended the wait every time. The tool now gives the offer
+  up to 5 s more, and gives a resume's `ACCEPT` 2.5 s.
+
 ## Consequences
 
-- mIRC already shows progress, so nothing of value is lost to the human; the agent gets the
-  exception, which is what it needs.
-- The daemon needs no filesystem access at all, which is what lets it run on a different machine
-  from mIRC.
-- A transfer that stalls without the connection breaking may not produce `GETFAIL`, in which case
-  the agent hears nothing. If observation shows that happening, the minimum fix is a liveness-only
-  check in mSL that emits only when the file stops growing.
-- Partial files are left in place and reported rather than cleaned up.
+- mIRC already shows progress to the human; the agent now sees it too, and hears about a stall that
+  no event would report.
+- The daemon still needs no filesystem access, which is what lets it run on a different machine from
+  mIRC.
+- Polling costs one small frame each way every 15 s, and only while a transfer is open.
+- A stall is inferred, not reported: 60 s without bytes. A bot that pauses for longer and then
+  carries on is shown as _stalled_ in between, then _downloading_ again.
+- Partial files are left in place: they are what a later request resumes from.

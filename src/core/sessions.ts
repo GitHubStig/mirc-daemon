@@ -20,6 +20,8 @@ import {
   type ChansPayload,
   type CmdFrame,
   type ConnsPayload,
+  type DccGet,
+  type DccJob,
   type NetworkState,
   type NetworkStatus,
   type SessionInfo,
@@ -41,6 +43,39 @@ export interface SessionOptions {
   maxInFlight?: number;
   defaultCommandTimeoutMs?: number;
   bufferCapacity?: number;
+  /** How often to ask mIRC about open downloads while a transfer runs. */
+  progressIntervalMs?: number;
+  /** No new bytes for this long and a download counts as stalled. */
+  stallAfterMs?: number;
+}
+
+/**
+ * Often enough that a stall shows within the minute it takes to call it one,
+ * rarely enough that the frames are noise next to IRC traffic.
+ */
+const PROGRESS_INTERVAL_MS = 15_000;
+
+/** mIRC's `gets` answer, trusting no field: an older script may not send it. */
+function toGets(data: Record<string, unknown> | undefined): DccGet[] {
+  const list = Array.isArray(data?.gets) ? data.gets : [];
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  return list
+    .filter((g): g is Record<string, unknown> => typeof g === "object" && g !== null)
+    .filter((g) => typeof g.nick === "string" && typeof g.file === "string")
+    .map((g) => {
+      const size = num(g.size);
+      const rcvd = num(g.rcvd);
+      // mIRC keeps a finished get's window, and $get().done did not say so live
+      // (0 for a window at full size), so a full count is what marks it done.
+      return {
+        nick: g.nick as string,
+        file: g.file as string,
+        size,
+        rcvd,
+        cps: num(g.cps),
+        done: g.done === true || g.done === 1 || (size > 0 && rcvd >= size),
+      };
+    });
 }
 
 export class Session {
@@ -49,7 +84,7 @@ export class Session {
   readonly state = new StateModel();
   readonly log: EventLog;
   readonly bus: EventBus;
-  readonly dcc = new DccTracker();
+  readonly dcc: DccTracker;
   /** What the agent opened or joined itself; see ownership.ts. */
   readonly owned = new OwnershipLedger();
   readonly commands: CommandDispatcher;
@@ -58,11 +93,16 @@ export class Session {
   /** mIRC's DCC send-request setting ($sreq) as of the last refresh, if reported. */
   sreq?: string;
   #closed = new AbortController();
+  #progressIntervalMs: number;
+  #progressTimer?: ReturnType<typeof setInterval>;
+  #polling = false;
 
   constructor(options: SessionOptions) {
     this.id = options.id;
     this.nick = options.nick;
     this.mirc = options.mirc;
+    this.dcc = new DccTracker({ stallAfterMs: options.stallAfterMs });
+    this.#progressIntervalMs = options.progressIntervalMs ?? PROGRESS_INTERVAL_MS;
     this.log = new EventLog(options.bufferCapacity);
     this.bus = new EventBus((err, event) => {
       options.log?.error("bus.handler-failed", {
@@ -94,8 +134,45 @@ export class Session {
     this.owned.applyEvent(event, ours);
     this.state.applyEvent(event);
     this.dcc.applyEvent(event);
+    this.#syncProgressPolling();
     this.bus.emit(event);
     return event;
+  }
+
+  /**
+   * Ask mIRC about its open downloads and fold the answer into the jobs.
+   * Runs on a timer while any transfer is open; callable directly too. A
+   * failed ask changes nothing: an older bridge.mrc without `gets` just means
+   * no progress, as before.
+   */
+  async pollTransfers(): Promise<DccJob[]> {
+    if (this.#polling) return [];
+    // A job can end outside the event stream (xdcc_cancel), so the timer
+    // stops itself here rather than ticking on with nothing to do.
+    if (this.dcc.transferring().length === 0) {
+      this.#syncProgressPolling();
+      return [];
+    }
+    this.#polling = true;
+    try {
+      const outcome = await this.commands.send("gets", undefined, { timeoutMs: 5000 });
+      if (!outcome.ok) return [];
+      return this.dcc.applyProgress(toGets(outcome.data));
+    } finally {
+      this.#polling = false;
+      this.#syncProgressPolling();
+    }
+  }
+
+  /** Poll only while there is something to poll for. */
+  #syncProgressPolling(): void {
+    const wanted = !this.#closed.signal.aborted && this.dcc.transferring().length > 0;
+    if (wanted && this.#progressTimer === undefined) {
+      this.#progressTimer = setInterval(() => void this.pollTransfers(), this.#progressIntervalMs);
+    } else if (!wanted && this.#progressTimer !== undefined) {
+      clearInterval(this.#progressTimer);
+      this.#progressTimer = undefined;
+    }
   }
 
   /**
@@ -164,6 +241,7 @@ export class Session {
   close(reason: string): void {
     this.commands.close(reason);
     this.#closed.abort(reason);
+    this.#syncProgressPolling();
   }
 }
 

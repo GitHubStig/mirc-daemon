@@ -5,7 +5,7 @@ decision see `docs/adr/`. This file is about what is true **right now**.
 
 ## Short version
 
-_Last updated 2026-10-22, end of session. Protocol **v3**, 231 tests, 23 MCP tools._
+_Last updated 2026-10-23. Protocol **v3**, 23 MCP tools._
 
 Everything an agent needs works against a real mIRC 7.85:
 
@@ -16,14 +16,15 @@ Everything an agent needs works against a real mIRC 7.85:
   on the user's;
 - TLS;
 - the whole DCC path: offer, completion, failure and cancel, with the file name and size reported so
-  the user can confirm a pack before trusting it (ADR-0010).
+  the user can confirm a pack before trusting it (ADR-0010);
+- XDCC from a real bot through to completion, with progress while it runs, resuming a broken
+  transfer by asking again, and catching a repeat request for a pack still in progress.
 
 **What is left:**
 
-- a real XDCC bot through to completion; only the bot's side is unproven, everything after the offer
-  is;
 - the refused-join check, which needs a `+i` channel held by someone else;
-- whether a transfer that _stalls_ without disconnecting reports anything.
+- the bot's queue (`queued` with a position) against a real bot; this one always sent at once;
+- a real stall: the 60 s _stalled_ state is unit-tested, not yet seen live.
 
 ## Picking this up in a new session
 
@@ -36,8 +37,11 @@ lines), this file, then `docs/adr/` (0010 and 0012 cover most recent work).
   straight from `<repo>\mirc\bridge.mrc` and pops a reload prompt on every write.
   Write mSL changes with a small Deno patch script that writes the file once, not with several
   edits.
-- **Never request a pack whose contents you cannot confirm**, and never from a channel distributing
-  pirated material, even when asked. Self-send (below) tests DCC legitimately.
+- **Request the pack straight away, then tell the user what is coming.** Users go straight to
+  `xdcc send`, never `xdcc info`, so the agent does too. As soon as the bot's offer names the file
+  and size, tell the user, and cancel with `xdcc_cancel` if it is not what they wanted. Never
+  knowingly fetch pirated material: if an offer's name shows that is what it is, cancel it.
+  Self-send (below) also tests DCC with no bot.
 - **Nothing sent to IRC may mark the traffic as automated.** No agent nick, and mIRC's own default
   quit message unless the user gives one.
 - **The user's things are theirs.** The agent may use the user's connections and channels. It
@@ -47,6 +51,11 @@ lines), this file, then `docs/adr/` (0010 and 0012 cover most recent work).
 **The user's mIRC right now:**
 
 - connected to EFnet as `` me `` (`cid 1`), in `#home!`;
+- the agent's connection to `irc.williamgattone.it` (`cid 105`, TLS), in `#HiGH-VoLtAgE`; the daemon
+  has restarted since, so it shows `openedByAgent: false` and needs `confirm: true` to close;
+- `D:\Downloads\VoLtAgESoFT-LiNUX04\ubuntu-mate-16.04.4-desktop-amd64.iso` (complete, 1,746,124,800
+  bytes), the test file; cutting it short (`SetLength`) and asking for pack #39 again is a quick
+  resume test, and mIRC's get windows from those runs may still be open;
 - a few quit agent windows may still be open;
 - DCC send requests are set to auto-accept (`sreq: auto`);
 - "accept invalid certificates" was turned on for the TLS test;
@@ -102,12 +111,13 @@ Proven by running it, with evidence in the log:
   member counts.
 - **Daemon runs**: `deno task start` binds `127.0.0.1:8686` (mIRC, raw TCP) and `127.0.0.1:8687`
   (agents, HTTP). `/health` is unauthenticated, `/status` and `/mcp` require the bearer token.
-- **231 automated tests** (`deno task test`): MBP framing including CRLF and oversize rejection,
-  logging with redaction, the state model, the event log and waits, credit-limited command dispatch,
-  the failure taxonomy, DCC job tracking and the XDCC reply classifier, ownership receipts, the
-  listener, config, the INI reader, the HTTP door, and the 23-tool MCP surface driven by the SDK's
-  own client. The frame shapes `bridge.mrc` emits are covered in `tests/bridge_contract_test.ts`.
-  The tests cannot prove mIRC _runs_ a handler; see traps 15 and 16.
+- **The automated tests** (`deno task test`) cover: MBP framing including CRLF and oversize
+  rejection, logging with redaction, the state model, the event log and waits, credit-limited
+  command dispatch, the failure taxonomy, DCC job tracking and the XDCC reply classifier, ownership
+  receipts, the listener, config, the INI reader, the HTTP door, and the 23-tool MCP surface driven
+  by the SDK's own client. The frame shapes `bridge.mrc` emits are covered in
+  `tests/bridge_contract_test.ts`. The tests cannot prove mIRC _runs_ a handler; see traps 15
+  and 16.
 - **The 23 tools**:
   - status: `daemon_status`, `irc_list_sessions`, `irc_get_state`;
   - reading and waiting: `irc_read`, `irc_wait_for`, `irc_members`, `irc_ison`;
@@ -227,6 +237,32 @@ Proven by running it, with evidence in the log:
     close, and the job ended `cancelled` with the path recorded. The cancel is now recorded before
     acting, so that abort is always recognised as ours.
 
+- **XDCC from a real bot, end to end** (2026-10-23, `irc.williamgattone.it` over TLS,
+  `#HiGH-VoLtAgE`, bot `VoLtAgE|SoFT-LiNUX|04`, pack #39 = `ubuntu-mate-16.04.4-desktop-amd64.iso`,
+  1.6 GB, a free Linux image).
+  - `xdcc send #39` straight away. The bot answered in Italian and its `DCC SEND` arrived 736 ms
+    later. The job was `offered` with the right name and size, and completed in 853 s at the bot's 2
+    MB/s cap, with `savedAs` and the file at exactly its advertised size.
+  - **Asking again for a complete file:** mIRC resumed 8 KB short of the end. The bot's `DCC ACCEPT`
+    gave the position, and the job ended `complete` in 3 s. The tool now says "already had this
+    whole file".
+  - **Asking again while it runs:** the bot answered "Hai già richiesto questo pack!". Unrecognised,
+    that left a second job stuck in `requested`, which would also have caught the first job's
+    outcome. `xdcc_fetch` now returns the existing job and sends nothing, seen live in 3 ms.
+  - **Cancel, then ask again:** `XDCC CANCEL` and the closed get (the bot confirmed, "Trasferimento
+    annullato dall'utente"), then a new request resumed at 629,740,868 and completed. Partial files
+    cut to 500 MB, 1.4 GB and 1.5 GB each resumed from the right byte.
+  - **Progress (`gets`):** `$get(N)` is the sender's nick (`.nick` is empty), `.rcvd` counts from
+    the start of the file, `.cps` is the rate, and `.done` stayed 0 for a finished get, so the
+    daemon treats `rcvd = size` as done. A finished get's window stays listed. Live, the job went
+    `offered` → `downloading` on the first poll and reported `1.5 GB of 1.6 GB (91%), 2.0 MB/s`
+    every 15 s until it completed.
+  - **A failed connect** to the bot's port (twice, `GETFAIL` after 21 s) was followed by the bot
+    offering again by itself. That re-offer now continues the failed job instead of opening one
+    nobody asked for.
+  - `xdcc_fetch` had been ending its wait on the bot's unrecognised "sending you" line, 300 ms
+    before the offer. It now waits up to 5 s more for the offer, and 2.5 s for a resume's `ACCEPT`.
+
 ## Not verified
 
 Assumed or untested. Treat these as the actual risk surface.
@@ -243,16 +279,18 @@ Carried over:
    `/join #some-test`, `/mode #some-test +i`, and stay in it. With a 477 refusal, also check that
    the hint names the current nick and any services rename.
 
-**XDCC against a real bot has still not completed a transfer.** The Linux bot on
-`irc.williamgattone.it` (TLS works; its certificate does not verify) proved `&` channels and `|`
-nicks. But its packs are listed only behind a website banner, on a network that also distributes
-pirated games and films, so pack #1 could not be confirmed and was not requested. The DCC machinery
-itself is now proven by self-send (see Verified). What remains for a bot is only the bot's side: its
-reply moving the job to `queued` or straight to the offer, against a bot whose packs can be checked
-over IRC.
+**XDCC, still unseen live:** a bot's queue (`queued` with a position); this bot always sent at once.
+And a real stall: the daemon now calls a transfer _stalled_ after 60 s without new bytes, whatever
+mIRC does or does not report, but that is unit-tested only.
 
-Still open from DCC recon: does `GETFAIL` fire when a transfer stalls _without_ the connection
-breaking? If not, the liveness-only stall check described in ADR-0010 is needed.
+**Bot replies are text, and the daemon does not have to understand them.** Everything from the offer
+on is protocol (`DCC SEND`, `DCC ACCEPT`, `FILERCVD`/`GETFAIL`, `$get` bytes), so a transfer never
+depends on wording. Before the offer, bots speak in their operator's language. The classifier
+(`src/core/xdcc.ts`) acts only on what it recognises, and matches the bot's own words with quoted
+file names taken out (a release named `Access.Denied` once read as a refusal). Anything else is kept
+verbatim as `lastReply` with `lastReplyKind: "unknown"`, and `irc_dcc_watch` wakes on every new
+reply with `botSaid` and `readIt`. The agent reads it, in any language, tells the user, and closes a
+refused job with `xdcc_cancel {tellBot: false}`.
 
 Beyond those:
 
@@ -385,19 +423,10 @@ minimised **`@bridge`** window, not the active channel. Available while debuggin
 
 ## Next, in order
 
-1. **A real XDCC transfer, through to completion.** Find a bot whose packs can be confirmed over IRC
-   (it answers `xdcc list`, or announces packs in its channel) and that serves something free to
-   share, such as Linux images or public-domain files. Then run `xdcc_fetch` and check, in order:
-   - the bot's reply moves the job (`queued` with a position, or straight to `offered`);
-   - `downloading:` names the right file;
-   - `FILERCVD` closes the job `complete`, with `savedAs`.
-
-   The `irc.williamgattone.it` Linux bot is a dead end: its list sits behind a website banner, on a
-   network that also distributes pirated software.
-2. **Close the remaining live gaps** under "Not verified" when the chance arises: the refused-join
-   check, which needs someone holding a `+i` channel; whether a stalled transfer reports `GETFAIL`;
-   receipts dropping when the user closes an agent window.
-3. **Cleanup**: decide whether `--allow-raw` is needed; consider a daemon-side heartbeat so a dead
+1. **Close the remaining live gaps** under "Not verified" when the chance arises: a bot's queue; a
+   real stall; the refused-join check, which needs someone holding a `+i` channel; receipts dropping
+   when the user closes an agent window (closing `cid 105` and calling `irc_get_state` checks it).
+2. **Cleanup**: decide whether `--allow-raw` is needed; consider a daemon-side heartbeat so a dead
    link is noticed without waiting on TCP. `on *:CONNECTFAIL:` is documented as not firing, and a
    connect to a dead server still costs the full 60 s timeout. Find another signal if that matters.
 

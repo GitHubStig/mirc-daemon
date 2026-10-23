@@ -46,9 +46,21 @@ export function plainText(text: string): string {
   return text.replace(FORMATTING_RE, "").replace(/\s+/g, " ").trim();
 }
 
+/**
+ * The words a bot chose, with the file names it quotes taken out. Release names
+ * are full of words like "Denied" or "Queue", and a refusal pattern matching
+ * one would end a job the bot was in fact sending.
+ */
+function ownWords(plain: string): string {
+  return plain
+    .toLowerCase()
+    .replace(/"[^"]*"/g, '"file"')
+    .replace(/\S+\.[a-z0-9]{2,5}\b/g, "file");
+}
+
 export function classifyBotReply(text: string): BotReply {
   const plain = plainText(text);
-  const lower = plain.toLowerCase();
+  const lower = ownWords(plain);
 
   // Order matters: "queued" lines often mention "send", and refusals often
   // mention the pack.
@@ -61,10 +73,11 @@ export function classifyBotReply(text: string): BotReply {
   ) {
     return { kind: "denied", text: plain };
   }
+  // Italian "Hai già richiesto questo pack!" seen live on irc.williamgattone.it.
+  // The accent is matched loosely: a bot sending Latin-1 arrives differently.
   if (
-    /already (have|requested|queued|in queue|receiving)|you have a dcc pending|pending dcc/.test(
-      lower,
-    )
+    /already (have|requested|queued|in queue|receiving)|you have a dcc pending|pending dcc|\bgi\S{0,2} richiesto/
+      .test(lower)
   ) {
     return { kind: "pending", text: plain };
   }
@@ -78,7 +91,8 @@ export function classifyBotReply(text: string): BotReply {
   ) {
     return { kind: "busy", text: plain };
   }
-  if (/\bsending you\b|\bsending pack\b/.test(lower)) {
+  // Italian "Ti sto inviando il pack #39 (...)" seen live on irc.williamgattone.it.
+  if (/\bsending you\b|\bsending pack\b|ti sto inviando/.test(lower)) {
     const file = /"([^"]+)"/.exec(plain)?.[1] ?? /\(([^()]+\.[a-z0-9]{1,5})\)/i.exec(plain)?.[1];
     return file ? { kind: "sending", file, text: plain } : { kind: "sending", text: plain };
   }
@@ -106,4 +120,25 @@ export function parseDccOffer(
   if (!m) return undefined;
   const file = m[1] ?? m[2];
   return m[3] !== undefined ? { file, size: Number(m[3]) } : { file };
+}
+
+export interface DccAccept {
+  file: string;
+  /** The byte the bot will resume from. */
+  position: number;
+}
+
+/**
+ * The bot's answer to mIRC's `DCC RESUME`: `DCC ACCEPT <file> <port> <position>`.
+ * mIRC sends the RESUME by itself when the file already exists, so this is the
+ * only sign the daemon gets that a transfer is a resume.
+ */
+export function parseDccAccept(
+  ctcp: string | undefined,
+  rest: string | undefined,
+): DccAccept | undefined {
+  if (!ctcp || ctcp.toUpperCase() !== "DCC" || !rest) return undefined;
+  const m = /^ACCEPT\s+(?:"([^"]+)"|(\S+))\s+\d+\s+(\d+)/i.exec(rest.trim());
+  if (!m) return undefined;
+  return { file: m[1] ?? m[2], position: Number(m[3]) };
 }

@@ -1,6 +1,12 @@
 import { assertEquals } from "@std/assert";
-import { DccTracker, describeDownload, humanSize } from "../src/core/dcc.ts";
-import type { BridgeEvent } from "../src/core/types.ts";
+import {
+  alreadyHad,
+  DccTracker,
+  describeDownload,
+  describeProgress,
+  humanSize,
+} from "../src/core/dcc.ts";
+import type { BridgeEvent, DccGet, DccJob } from "../src/core/types.ts";
 
 function dccEvent(event: string, extra: Record<string, unknown> = {}, net = "net1"): BridgeEvent {
   return { seq: 1, ts: Date.now(), kind: "dcc", net, extra: { event, ...extra } };
@@ -186,6 +192,21 @@ Deno.test("an unrecognised reply is kept, but does not decide anything", () => {
   tracker.applyEvent(from("notice", { text: "\x0304Welcome!\x03 Rules at example.org" }));
   assertEquals(job.state, "requested");
   assertEquals(job.lastReply, "Welcome! Rules at example.org");
+  assertEquals(job.lastReplyKind, "unknown");
+  assertEquals(typeof job.lastReplyTs, "number");
+});
+
+Deno.test("a reply during the transfer is kept for the agent but moves nothing", () => {
+  const tracker = new DccTracker();
+  const job = tracker.start({ cid: 7, net: "Rizon", bot: "Bot", pack: "1" });
+  tracker.applyEvent(
+    from("ctcp", { buf: undefined, extra: { ctcp: "DCC", text: "SEND a.iso 1 2 10" } }),
+  );
+  // Seen live while a transfer waited on mIRC's connect.
+  const said = "** Hai un trasferimento DCC in attesa (150 secondi rimanenti prima del timeout)";
+  assertEquals(tracker.applyEvent(from("notice", { text: said })), job);
+  assertEquals(job.state, "offered");
+  assertEquals(job.lastReply, said);
 });
 
 Deno.test("an offer nobody asked for is still tracked", () => {
@@ -255,4 +276,162 @@ Deno.test("an unrequested transfer remembers who sent it", () => {
     }),
   );
   assertEquals(job?.sender, "Friend");
+});
+
+// --- resumes, re-offers and progress (seen live, irc.williamgattone.it 2026-10-23) ---
+
+const ISO = "ubuntu-mate-16.04.4-desktop-amd64.iso";
+const ISO_SIZE = 1746124800;
+
+/** A job for pack #39 that the bot has offered. */
+function offered(tracker: DccTracker): DccJob {
+  const job = tracker.start({ cid: 7, net: "Rizon", bot: "Bot", pack: "39" });
+  tracker.applyEvent(
+    from("ctcp", {
+      buf: undefined,
+      extra: { ctcp: "DCC", text: `SEND ${ISO} 1 42617 ${ISO_SIZE}` },
+    }),
+  );
+  return job;
+}
+
+function accept(position: number): BridgeEvent {
+  return from("ctcp", {
+    buf: undefined,
+    extra: { ctcp: "DCC", text: `ACCEPT ${ISO} 42617 ${position}` },
+  });
+}
+
+function get(rcvd: number, fields: Partial<DccGet> = {}): DccGet {
+  return { nick: "Bot", file: ISO, size: ISO_SIZE, rcvd, cps: 2_000_000, done: false, ...fields };
+}
+
+Deno.test("a DCC ACCEPT marks the transfer as a resume, from where it picks up", () => {
+  const tracker = new DccTracker();
+  const job = offered(tracker);
+  tracker.applyEvent(accept(524279808));
+  assertEquals(job.resumedFrom, 524279808);
+  assertEquals(alreadyHad(job), false);
+  assertEquals(describeProgress(job), "resumed from 500.0 MB");
+});
+
+Deno.test("a resume from the last 8 KB means mIRC already had the whole file", () => {
+  const tracker = new DccTracker();
+  const job = offered(tracker);
+  tracker.applyEvent(accept(ISO_SIZE - 8192));
+  assertEquals(alreadyHad(job), true);
+});
+
+Deno.test("the bot offering again after a failed connect continues the same job", () => {
+  const tracker = new DccTracker();
+  const job = offered(tracker);
+  tracker.applyEvent(dccEvent("getfail", { file: `F:\\DL\\${ISO}`, from: "Bot" }, "Rizon"));
+  assertEquals(job.state, "failed");
+  // The bot's own retry, with no new request from us.
+  tracker.applyEvent(
+    from("ctcp", {
+      buf: undefined,
+      extra: { ctcp: "DCC", text: `SEND ${ISO} 1 38423 ${ISO_SIZE}` },
+    }),
+  );
+  assertEquals(job.state, "offered");
+  assertEquals(job.endedTs, undefined);
+  assertEquals(tracker.list().length, 1);
+});
+
+Deno.test("a re-offer of a different file is a new job, not the failed one", () => {
+  const tracker = new DccTracker();
+  const job = offered(tracker);
+  tracker.applyEvent(dccEvent("getfail", { file: ISO, from: "Bot" }, "Rizon"));
+  tracker.applyEvent(
+    from("ctcp", { buf: undefined, extra: { ctcp: "DCC", text: "SEND other.iso 1 2 3" } }),
+  );
+  assertEquals(job.state, "failed");
+  assertEquals(tracker.list().length, 2);
+});
+
+Deno.test("bytes arriving move an offered job to downloading, with its progress", () => {
+  const tracker = new DccTracker();
+  const job = offered(tracker);
+  const changed = tracker.applyProgress([get(873062400)], 1000);
+  assertEquals(changed, [job]);
+  assertEquals(job.state, "downloading");
+  assertEquals(job.rcvd, 873062400);
+  assertEquals(describeProgress(job), "832.6 MB of 1.6 GB (50%), 1.9 MB/s");
+});
+
+Deno.test("no new bytes for the stall window makes it stalled; more bytes make it downloading", () => {
+  const tracker = new DccTracker({ stallAfterMs: 60_000 });
+  const job = offered(tracker);
+  tracker.applyProgress([get(1000)], 0);
+  assertEquals(tracker.applyProgress([get(1000)], 59_000), []);
+  assertEquals(job.state, "downloading");
+  tracker.applyProgress([get(1000)], 60_000);
+  assertEquals(job.state, "stalled");
+  tracker.applyProgress([get(2000)], 61_000);
+  assertEquals(job.state, "downloading");
+});
+
+Deno.test("a resume's starting bytes are not mistaken for progress", () => {
+  const tracker = new DccTracker();
+  const job = offered(tracker);
+  tracker.applyEvent(accept(524279808));
+  // mIRC counts from the start of the file, so a resume begins high.
+  tracker.applyProgress([get(524279808)], 0);
+  assertEquals(job.state, "offered");
+  tracker.applyProgress([get(530000000)], 15_000);
+  assertEquals(job.state, "downloading");
+});
+
+Deno.test("progress is matched by sender and file name, preferring a live window", () => {
+  const tracker = new DccTracker();
+  const job = offered(tracker);
+  tracker.applyProgress(
+    [
+      get(ISO_SIZE, { done: true }),
+      get(5000, { nick: "SomeoneElse" }),
+      get(7000, { file: `F:\\DL\\${ISO}` }),
+    ],
+    0,
+  );
+  assertEquals(job.rcvd, 7000);
+});
+
+Deno.test("a completed job shows the whole file, not the last poll's count", () => {
+  const tracker = new DccTracker();
+  const job = offered(tracker);
+  tracker.applyProgress([get(1728503688)], 0);
+  tracker.applyEvent(dccEvent("complete", { file: ISO, from: "Bot" }, "Rizon"));
+  assertEquals(job.rcvd, ISO_SIZE);
+  assertEquals(describeProgress(job), "1.6 GB of 1.6 GB (100%)");
+});
+
+Deno.test("a job that has ended takes no progress", () => {
+  const tracker = new DccTracker();
+  const job = offered(tracker);
+  tracker.cancel(job, "cancelled on request");
+  assertEquals(tracker.applyProgress([get(5000)], 0), []);
+  assertEquals(job.rcvd, undefined);
+});
+
+Deno.test("an active request for the same bot and pack is found; an ended one is not", () => {
+  const tracker = new DccTracker();
+  const job = offered(tracker);
+  assertEquals(tracker.activeRequest(7, "bot", "#39"), job);
+  assertEquals(tracker.activeRequest(7, "Bot", "40"), undefined);
+  // The same nick on another connection is another bot.
+  assertEquals(tracker.activeRequest(8, "Bot", "39"), undefined);
+  tracker.applyEvent(dccEvent("getfail", { file: ISO, from: "Bot" }, "Rizon"));
+  assertEquals(tracker.activeRequest(7, "Bot", "39"), undefined);
+});
+
+Deno.test("listeners hear changes from events and from progress alike", () => {
+  const tracker = new DccTracker();
+  const heard: string[] = [];
+  const stop = tracker.onChange((j) => heard.push(j.state));
+  offered(tracker);
+  tracker.applyProgress([get(1000)], 0);
+  stop();
+  tracker.applyProgress([get(2000)], 1);
+  assertEquals(heard, ["offered", "downloading"]);
 });

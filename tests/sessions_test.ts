@@ -27,3 +27,28 @@ Deno.test("the registry infers a session only when exactly one is attached", () 
   assertEquals(registry.resolve(), undefined);
   assertEquals(registry.resolve("s2")?.id, "s2");
 });
+
+Deno.test("progress is polled only while a transfer is open, and the poll stops on close", async () => {
+  const sent: string[] = [];
+  const s = new Session({
+    id: "s1",
+    nick: "me",
+    write: (cmd) => sent.push(cmd.action),
+    progressIntervalMs: 20,
+  });
+  s.record({ kind: "notice", net: "net1", nick: "Bot", buf: "Bot", text: "hello" });
+  await new Promise((r) => setTimeout(r, 60));
+  assertEquals(sent.includes("gets"), false);
+
+  s.dcc.start({ net: "net1", bot: "Bot", pack: "1" });
+  s.record({
+    kind: "ctcp",
+    net: "net1",
+    nick: "Bot",
+    extra: { ctcp: "DCC", text: "SEND a.iso 1 2 10" },
+  });
+  await new Promise((r) => setTimeout(r, 60));
+  assertEquals(sent.includes("gets"), true);
+  // Closing clears the timer; Deno's sanitizer fails the test if it leaks.
+  s.close("test over");
+});

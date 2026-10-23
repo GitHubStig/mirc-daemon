@@ -4,33 +4,37 @@
  * A job is opened when the agent asks a bot for a pack, and then moves on the
  * strength of what happens next, whether or not a tool call is waiting:
  *
- *   requested → (queued) → offered → complete
+ *   requested → (queued) → offered → downloading ⇄ stalled → complete
  *                                  ↘ refused / failed
  *
  *  - The bot's reply, a notice or private message, is read for its meaning
  *    (xdcc.ts): queued with a position, denied, no such pack, already pending,
  *    busy.
  *  - The bot's `DCC SEND` offer (a CTCP) means the transfer is starting, and
- *    says the file name and size.
+ *    says the file name and size. A `DCC ACCEPT` after it means mIRC is
+ *    resuming a file it already has, and says from where.
+ *  - mIRC's open downloads, polled with `gets` while a transfer runs, move it
+ *    to downloading and carry the byte count. No growth for a minute is
+ *    "stalled": mIRC raises no event for a transfer that hangs without the
+ *    connection breaking, so this is the only way an agent hears of one.
  *  - mIRC's `on FILERCVD` / `on GETFAIL` end it.
  *
  * This runs in the background because bots can be slow. In the live test,
  * AxA-MP1 answered after almost four minutes, far past what any tool call can
  * wait: MCP clients give up after about 60 s. The tools wait briefly and then
  * report the job; later replies still land on it.
- *
- * Progress is deliberately absent: mIRC already shows it, and relaying
- * percentages would cost a timer and a file watcher for nothing.
  */
 
 import {
   ACTIVE_DCC_STATES,
   type BridgeEvent,
+  type DccGet,
   type DccJob,
   type DccState,
   sameNetwork,
+  TRANSFER_DCC_STATES,
 } from "./types.ts";
-import { classifyBotReply, parseDccOffer } from "./xdcc.ts";
+import { classifyBotReply, parseDccAccept, parseDccOffer } from "./xdcc.ts";
 import { isChannelBuffer } from "./waits.ts";
 
 export interface DccRequest {
@@ -42,9 +46,40 @@ export interface DccRequest {
 
 const MAX_REMEMBERED = 100;
 
+/** No new bytes for this long and an open download counts as stalled. */
+export const STALL_AFTER_MS = 60_000;
+
+/**
+ * How long after a failure a fresh offer of the same file from the same bot
+ * continues that job. Seen live: after mIRC's connect to the bot timed out, the
+ * bot offered the file again by itself, and that became a job nobody asked for.
+ */
+const REOFFER_WINDOW_MS = 120_000;
+
 export class DccTracker {
   #jobs: DccJob[] = [];
   #seq = 0;
+  #listeners = new Set<(job: DccJob) => void>();
+  #stallAfterMs: number;
+
+  constructor(options: { stallAfterMs?: number } = {}) {
+    this.#stallAfterMs = options.stallAfterMs ?? STALL_AFTER_MS;
+  }
+
+  /**
+   * Hear about every job change, whether an event or a progress poll caused
+   * it. Polls arrive outside the event stream, so waiting on events alone
+   * would miss a job going to downloading or stalled.
+   */
+  onChange(listener: (job: DccJob) => void): () => void {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+
+  #changed(job: DccJob | undefined): DccJob | undefined {
+    if (job) { for (const listener of [...this.#listeners]) listener(job); }
+    return job;
+  }
 
   /** Open a job for a pack we are about to request. */
   start(request: DccRequest): DccJob {
@@ -70,12 +105,12 @@ export class DccTracker {
   applyEvent(event: BridgeEvent): DccJob | undefined {
     switch (event.kind) {
       case "ctcp":
-        return this.#onOffer(event);
+        return this.#changed(this.#onOffer(event) ?? this.#onAccept(event));
       case "notice":
       case "text":
-        return this.#onReply(event);
+        return this.#changed(this.#onReply(event));
       case "dcc":
-        return this.#onOutcome(event);
+        return this.#changed(this.#onOutcome(event));
       default:
         return undefined;
     }
@@ -89,22 +124,61 @@ export class DccTracker {
     );
     if (!offer) return undefined;
     // An offer nobody asked for still becomes a job, so it is visible.
-    const job = this.#activeFrom(event.cid, event.nick) ?? this.#open(event, offer.file);
+    const job = this.#activeFrom(event.cid, event.nick) ??
+      this.#recentlyFailed(event.cid, event.nick, offer.file) ??
+      this.#open(event, offer.file);
+    if (!isActive(job)) {
+      // The bot trying again after a failed connect: the same request, going on.
+      delete job.endedTs;
+      delete job.secs;
+      delete job.detail;
+    }
     job.file = offer.file;
     if (offer.size !== undefined) job.size = offer.size;
+    delete job.resumedFrom;
+    delete job.rcvd;
+    delete job.cps;
+    delete job.progressTs;
     this.#move(job, "offered");
     return job;
   }
 
-  /** What the bot said back, addressed to us. Channel chatter is ignored. */
+  /** The bot agreeing to mIRC's `DCC RESUME`: this transfer continues a file. */
+  #onAccept(event: BridgeEvent): DccJob | undefined {
+    const accept = parseDccAccept(
+      typeof event.extra?.ctcp === "string" ? event.extra.ctcp : undefined,
+      typeof event.extra?.text === "string" ? event.extra.text : undefined,
+    );
+    if (!accept) return undefined;
+    const job = this.#activeFrom(event.cid, event.nick);
+    if (!job || job.state !== "offered") return undefined;
+    job.resumedFrom = accept.position;
+    job.updatedTs = Date.now();
+    return job;
+  }
+
+  /**
+   * What the bot said back, addressed to us. Channel chatter is ignored.
+   *
+   * Every reply is kept, word for word, with whether it was understood. Bots
+   * answer in whatever language their operator chose, and no pattern list
+   * covers them all; the agent reading the words can. So a reply moves the job
+   * only when it is recognised, and is otherwise passed on for the agent to
+   * read, rather than guessed at.
+   */
   #onReply(event: BridgeEvent): DccJob | undefined {
     if (isChannelBuffer(event.buf) || !event.text) return undefined;
     const job = this.#activeFrom(event.cid, event.nick);
-    // Only a job still waiting on the bot can be moved by what the bot says.
-    if (!job || job.state === "offered") return undefined;
+    if (!job) return undefined;
 
     const reply = classifyBotReply(event.text);
     job.lastReply = reply.text;
+    job.lastReplyKind = reply.kind;
+    job.lastReplyTs = Date.now();
+    // Once the transfer is under way, the protocol says how it is going: the
+    // bot's words are kept for the agent, but no longer move the job.
+    if (TRANSFER_DCC_STATES.has(job.state)) return job;
+
     switch (reply.kind) {
       case "queued":
         job.position = reply.position;
@@ -166,6 +240,10 @@ export class DccTracker {
     if (savedAs) job.savedAs = savedAs;
     const size = event.extra?.size;
     if (typeof size === "number") job.size = size;
+    // The last poll is up to 15 s old; a finished file is all there.
+    if (state === "complete" && job.rcvd !== undefined && job.size !== undefined) {
+      job.rcvd = job.size;
+    }
     const reason = event.extra?.reason;
     if (typeof reason === "string" && reason.length > 0) job.detail = reason;
     // mIRC knows the real duration; only fall back to wall-clock if it did not say.
@@ -185,6 +263,90 @@ export class DccTracker {
     this.#move(job, "cancelled");
     job.endedTs = Date.now();
     job.detail = detail;
+    this.#changed(job);
+  }
+
+  /**
+   * Fold in mIRC's open downloads (`gets`). A job whose download has gained
+   * bytes is downloading; one that has gained none for the stall window is
+   * stalled. Returns the jobs whose state changed.
+   */
+  applyProgress(gets: readonly DccGet[], now = Date.now()): DccJob[] {
+    const changed: DccJob[] = [];
+    for (const job of this.transferring()) {
+      const get = this.#getFor(job, gets);
+      if (!get) continue;
+      if (get.size > 0 && job.size === undefined) job.size = get.size;
+      job.cps = get.cps;
+      const grew = job.rcvd === undefined ? get.rcvd > (job.resumedFrom ?? 0) : get.rcvd > job.rcvd;
+      job.rcvd = get.rcvd;
+      job.progressTs ??= now;
+      const before = job.state;
+      if (grew) {
+        job.progressTs = now;
+        if (job.state !== "downloading") this.#move(job, "downloading");
+      } else if (now - job.progressTs >= this.#stallAfterMs && job.state !== "stalled") {
+        this.#move(job, "stalled");
+      }
+      if (job.state !== before) changed.push(job);
+    }
+    for (const job of changed) this.#changed(job);
+    return changed;
+  }
+
+  /**
+   * The download mIRC has open for a job: same sender and file. mIRC keeps a
+   * finished get's window, so a live one is preferred over a done one.
+   */
+  #getFor(job: DccJob, gets: readonly DccGet[]): DccGet | undefined {
+    const sender = job.requestedBy?.bot ?? job.sender;
+    if (!sender) return undefined;
+    // bridge.mrc sends $nopath of the file; baseName again in case a path slips through.
+    // An empty nick (an older script read $get().nick, which mIRC leaves empty)
+    // falls back to the file name alone.
+    const mine = gets.filter((g) =>
+      (g.nick === "" || sameNick(sender, g.nick)) &&
+      (job.file === undefined ? g.nick !== "" : baseName(g.file) === job.file)
+    );
+    return mine.findLast((g) => !g.done) ?? mine.at(-1);
+  }
+
+  /** Jobs whose transfer mIRC has, or should have, open. */
+  transferring(): DccJob[] {
+    return this.#jobs.filter((j) => TRANSFER_DCC_STATES.has(j.state));
+  }
+
+  /**
+   * An active job for this bot and pack on this connection. Asking a bot again
+   * for a pack it is already handling is nearly always a mistake: the bot
+   * answers "already requested" (in its own language), and the second job
+   * would sit waiting forever and catch the first one's outcome.
+   */
+  activeRequest(cid: number | undefined, bot: string, pack: string): DccJob | undefined {
+    const wanted = normalisePack(pack);
+    return this.#jobs.find((j) =>
+      isActive(j) &&
+      (cid === undefined || j.cid === undefined || j.cid === cid) &&
+      sameNick(j.requestedBy?.bot, bot) &&
+      j.requestedBy?.pack !== undefined && normalisePack(j.requestedBy.pack) === wanted
+    );
+  }
+
+  /** A job from `nick` for `file` that failed moments ago, for a bot's re-offer. */
+  #recentlyFailed(
+    cid: number | undefined,
+    nick: string | undefined,
+    file: string,
+  ): DccJob | undefined {
+    if (!nick) return undefined;
+    const cutoff = Date.now() - REOFFER_WINDOW_MS;
+    for (let i = this.#jobs.length - 1; i >= 0; i--) {
+      const job = this.#jobs[i];
+      if (job.state !== "failed" || (job.endedTs ?? 0) < cutoff) continue;
+      if (cid !== undefined && job.cid !== undefined && job.cid !== cid) continue;
+      if (sameNick(job.requestedBy?.bot ?? job.sender, nick) && job.file === file) return job;
+    }
+    return undefined;
   }
 
   /** A job cancelled in the last minute whose late outcome this could be. */
@@ -293,6 +455,46 @@ export function describeDownload(job: DccJob): string | undefined {
   const size = humanSize(job.size);
   const pack = job.requestedBy?.pack ? `pack #${job.requestedBy.pack.replace(/^#/, "")} is ` : "";
   return `${pack}"${job.file}"${size ? ` (${size})` : ""}`;
+}
+
+/**
+ * How far along a transfer is, for the agent to relay: bytes, percentage and
+ * rate, and whether it is a resume. Undefined until there is something to say.
+ */
+export function describeProgress(job: DccJob): string | undefined {
+  const parts: string[] = [];
+  if (job.rcvd !== undefined) {
+    const of = job.size ? ` of ${humanSize(job.size)}` : "";
+    const pct = job.size ? ` (${Math.floor((job.rcvd / job.size) * 100)}%)` : "";
+    parts.push(`${humanSize(job.rcvd)}${of}${pct}`);
+    if (job.cps !== undefined && job.state === "downloading") parts.push(`${humanSize(job.cps)}/s`);
+  }
+  if (job.resumedFrom !== undefined) {
+    parts.push(
+      alreadyHad(job)
+        ? "mIRC already had the whole file and only re-checked its end"
+        : `resumed from ${humanSize(job.resumedFrom)}`,
+    );
+  }
+  if (job.state === "stalled" && job.progressTs !== undefined) {
+    const secs = Math.round((Date.now() - job.progressTs) / 1000);
+    parts.push(`no data for ${secs} s`);
+  }
+  return parts.length > 0 ? parts.join(", ") : undefined;
+}
+
+/**
+ * A resume from the last few KB: mIRC had the file already, so asking again
+ * cost a re-check, not a download. mIRC backs off 8 KB when resuming.
+ */
+export function alreadyHad(job: DccJob): boolean {
+  return job.resumedFrom !== undefined && job.size !== undefined &&
+    job.size - job.resumedFrom <= 64 * 1024;
+}
+
+/** "#39" and "39" are the same pack. */
+function normalisePack(pack: string): string {
+  return pack.trim().replace(/^#/, "");
 }
 
 function isActive(job: DccJob): boolean {

@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { classifyBotReply, parseDccOffer, plainText } from "../src/core/xdcc.ts";
+import { classifyBotReply, parseDccAccept, parseDccOffer, plainText } from "../src/core/xdcc.ts";
 
 Deno.test("plainText removes colours, bold and underline the way a person reads past them", () => {
   assertEquals(
@@ -73,4 +73,45 @@ Deno.test("anything that is not a DCC SEND offer is not one", () => {
   assertEquals(parseDccOffer("DCC", "CHAT chat 3232235777 5000"), undefined);
   assertEquals(parseDccOffer("DCC", "RESUME x.iso 5000 1024"), undefined);
   assertEquals(parseDccOffer(undefined, "SEND x 1 2 3"), undefined);
+});
+
+Deno.test("the Italian replies seen live are read for their meaning", () => {
+  // irc.williamgattone.it, 2026-10-23.
+  const sending = classifyBotReply(
+    '** Ti sto inviando il pack #39 ("ubuntu-mate-16.04.4-desktop-amd64.iso"), che ha grandezza 1.6GB. (ripresa download supportata)',
+  );
+  assertEquals(sending.kind, "sending");
+  assertEquals(sending.file, "ubuntu-mate-16.04.4-desktop-amd64.iso");
+  assertEquals(classifyBotReply("** Hai già richiesto questo pack!").kind, "pending");
+  // The same line from a bot that sends Latin-1, as a UTF-8 reader sees it.
+  assertEquals(classifyBotReply("** Hai gi\uFFFD richiesto questo pack!").kind, "pending");
+});
+
+Deno.test("words inside a file name are not taken for the bot's own", () => {
+  const sending = classifyBotReply('** Sending you pack #5 ("Access.Denied.S01.mkv"), 1.2GB');
+  assertEquals(sending.kind, "sending");
+  assertEquals(sending.file, "Access.Denied.S01.mkv");
+  assertEquals(
+    classifyBotReply("** Sending you pack #6 (Too.Many.Cooks.2014.mkv)").kind,
+    "sending",
+  );
+  // The bot's own refusal still reads as one.
+  assertEquals(
+    classifyBotReply('** XDCC SEND denied, pack "x.mkv" is for voiced users').kind,
+    "denied",
+  );
+});
+
+Deno.test("a DCC ACCEPT names the file and the byte the resume starts from", () => {
+  assertEquals(
+    parseDccAccept("DCC", "ACCEPT ubuntu-mate-16.04.4-desktop-amd64.iso 56819 524279808"),
+    { file: "ubuntu-mate-16.04.4-desktop-amd64.iso", position: 524279808 },
+  );
+  assertEquals(parseDccAccept("DCC", 'ACCEPT "two words.iso" 1 42'), {
+    file: "two words.iso",
+    position: 42,
+  });
+  // An offer is not an accept, and an accept is not an offer.
+  assertEquals(parseDccAccept("DCC", "SEND x.iso 1 2 3"), undefined);
+  assertEquals(parseDccOffer("DCC", "ACCEPT x.iso 2 3"), undefined);
 });

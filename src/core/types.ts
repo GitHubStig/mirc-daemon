@@ -230,7 +230,9 @@ export type ActionName =
   | "raw"
   | "nick"
   | "disconnect"
-  | "dccstop";
+  | "dccstop"
+  /** mIRC's open downloads ($get), polled while a transfer runs. */
+  | "gets";
 
 export interface CmdFrame {
   t: "cmd";
@@ -290,21 +292,54 @@ export interface SessionInfo {
 
 /**
  * Where a transfer stands. A requested pack moves requested → (queued) →
- * offered → complete, or ends refused or failed. The three before the end are
- * "active". Tracked in the background, because a busy bot can take minutes to
- * answer and no tool call can wait that long (clients give up after ~60 s).
+ * offered → downloading → complete, or ends refused or failed. Everything
+ * before the end is "active". Tracked in the background, because a busy bot
+ * can take minutes to answer and no tool call can wait that long (clients give
+ * up after ~60 s).
  */
 export type DccState =
   | "requested"
   | "queued"
   | "offered"
+  /** mIRC reports bytes arriving (polled with `gets`). */
+  | "downloading"
+  /** Still open in mIRC, but no bytes for a while: GETFAIL may never come. */
+  | "stalled"
   | "complete"
   | "refused"
   | "failed"
   /** Stopped on request (xdcc_cancel), e.g. because it was the wrong file. */
   | "cancelled";
 
-export const ACTIVE_DCC_STATES: ReadonlySet<DccState> = new Set(["requested", "queued", "offered"]);
+export const ACTIVE_DCC_STATES: ReadonlySet<DccState> = new Set([
+  "requested",
+  "queued",
+  "offered",
+  "downloading",
+  "stalled",
+]);
+
+/** The active states in which mIRC has (or should have) a download open. */
+export const TRANSFER_DCC_STATES: ReadonlySet<DccState> = new Set([
+  "offered",
+  "downloading",
+  "stalled",
+]);
+
+/**
+ * One of mIRC's open downloads, as `gets` reports it ($get(N)). `rcvd` counts
+ * from the start of the file, so a resumed transfer starts high.
+ */
+export interface DccGet {
+  nick: string;
+  file: string;
+  size: number;
+  rcvd: number;
+  /** Bytes per second, as mIRC measures it. */
+  cps: number;
+  /** True once mIRC considers the get finished (its window stays open). */
+  done: boolean;
+}
 
 export interface DccJob {
   id: string;
@@ -328,8 +363,28 @@ export interface DccJob {
   secs?: number;
   /** Queue position, while `queued`. */
   position?: number;
+  /**
+   * Where a resumed transfer picked up, from the bot's `DCC ACCEPT`. mIRC
+   * resumes whenever the file already exists, so asking again for a pack
+   * after a broken transfer continues it; for a file already complete, this
+   * is 8 KB short of the size (mIRC re-checks the tail) and it ends at once.
+   */
+  resumedFrom?: number;
+  /** Bytes on disk so far, from mIRC's last `gets` answer. */
+  rcvd?: number;
+  /** Transfer rate in bytes per second, from the same answer. */
+  cps?: number;
+  /** When `rcvd` last grew: what a stall is measured from. */
+  progressTs?: number;
   /** The bot's last reply, formatting removed: what to show a person. */
   lastReply?: string;
+  /**
+   * What the daemon made of `lastReply` ("queued", "denied", ...), or
+   * "unknown" when no pattern matched: then only reading it tells.
+   */
+  lastReplyKind?: string;
+  /** When `lastReply` arrived, so a waiter can tell a new reply from an old one. */
+  lastReplyTs?: number;
   /** Why it was refused or failed, in the bot's or mIRC's words. */
   detail?: string;
   /** Set when the job was opened by a tool call that asked for it. */

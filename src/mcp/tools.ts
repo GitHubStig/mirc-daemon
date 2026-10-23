@@ -26,12 +26,13 @@ import {
   EVENT_KINDS,
   type NetworkState,
   sameNetwork,
+  TRANSFER_DCC_STATES,
 } from "../core/types.ts";
 import type { Session, SessionRegistry } from "../core/sessions.ts";
 import { emptyChannelWarning } from "../core/outcomes.ts";
 import { waitForEvent, type WaitMatcher } from "../core/waits.ts";
 import { classifyBotReply } from "../core/xdcc.ts";
-import { describeDownload } from "../core/dcc.ts";
+import { alreadyHad, describeDownload, describeProgress } from "../core/dcc.ts";
 import type { LogSink } from "../core/log.ts";
 
 export interface ToolOptions {
@@ -198,9 +199,18 @@ function explainJoinRefusal(error: BridgeError, net: NetworkState): BridgeError 
 const MAX_WAIT_MS = 55_000;
 
 /**
- * Wait until `settled(job)` holds or `timeoutMs` passes. Jobs are moved by the
- * event stream (Session.record updates them before fanning out), so checking
- * on every event is enough. Resolves true if it settled.
+ * How long xdcc_fetch keeps waiting for the offer once the bot has said
+ * something it could not classify. The offer followed within 300 ms live.
+ */
+const OFFER_GRACE_MS = 5_000;
+
+/** How long xdcc_fetch waits after the offer for a resume's ACCEPT (and its end). */
+const RESUME_GRACE_MS = 2_500;
+
+/**
+ * Wait until `settled(job)` holds or `timeoutMs` passes. Jobs are moved by
+ * events and by progress polls, and the tracker reports both, so checking on
+ * every change is enough. Resolves true if it settled.
  */
 function waitForJob(
   session: Session,
@@ -219,7 +229,7 @@ function waitForJob(
       resolve(result);
     };
     const timer = setTimeout(() => stop(false), timeoutMs);
-    const unsubscribe = session.bus.on(() => {
+    const unsubscribe = session.dcc.onChange(() => {
       if (settled(job)) stop(true);
     });
     session.closed.addEventListener("abort", onDrop, { once: true });
@@ -239,6 +249,47 @@ function linkDropped(): ToolResult {
         "was not seen here. Ask again; once mIRC has reconnected, the call reaches it.",
     ),
   );
+}
+
+/**
+ * What a job means for the agent to do next, by state. A stalled transfer is
+ * the one that most needs saying: mIRC raises no event for it, and asking again
+ * resumes from what is on disk.
+ */
+function jobAdvice(job: DccJob): string | undefined {
+  switch (job.state) {
+    case "downloading":
+      return "Transferring. Follow it with irc_dcc_watch; it ends complete or failed.";
+    case "stalled":
+      return "No data has arrived for a while, though mIRC still has the download open. Tell " +
+        `the user. To retry, stop it with xdcc_cancel {job: "${job.id}"} and request the same ` +
+        "pack again: mIRC resumes from what it already has.";
+    case "failed":
+      return job.requestedBy
+        ? "Requesting the same pack again resumes from what mIRC already saved."
+        : undefined;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * The bot's last words, and whether the daemon understood them. Unrecognised
+ * replies are the agent's to read: bots answer in their operator's language,
+ * and an LLM reads Italian or Portuguese where a pattern list does not.
+ */
+function botSaid(job: DccJob): Record<string, unknown> {
+  if (job.lastReply === undefined) return {};
+  const understood = job.lastReplyKind !== undefined && job.lastReplyKind !== "unknown";
+  return {
+    botSaid: { text: job.lastReply, understood, ...(understood ? { as: job.lastReplyKind } : {}) },
+    ...(understood ? {} : {
+      readIt: "The daemon did not recognise the bot's reply, so the job has not moved on it. " +
+        "Read it yourself (it may be in another language) and tell the user what it means. If " +
+        `it is a refusal, close the job with xdcc_cancel {job: "${job.id}", tellBot: false}. ` +
+        "If it says the transfer is coming, follow it with irc_dcc_watch.",
+    }),
+  };
 }
 
 /** What mIRC will do with an offer, from its DCC send-request setting ($sreq). */
@@ -408,7 +459,18 @@ const jobArg = z
   .optional()
   .describe("A job id from xdcc_fetch, e.g. dcc3. Omit for the most recent active one.");
 const dccStatusSchema = z.object({ session: sessionArg, job: jobArg });
-const xdccCancelSchema = z.object({ session: sessionArg, job: jobArg, confirm: confirmArg });
+const xdccCancelSchema = z.object({
+  session: sessionArg,
+  job: jobArg,
+  confirm: confirmArg,
+  tellBot: z
+    .boolean()
+    .optional()
+    .describe(
+      "Send the bot XDCC CANCEL / XDCC REMOVE (default true). Pass false to just close the " +
+        "job, e.g. when the bot already refused in words the daemon did not recognise.",
+    ),
+});
 const dccWatchSchema = z.object({
   session: sessionArg,
   job: jobArg,
@@ -1046,20 +1108,27 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     "irc_dcc_status",
     {
       description:
-        "XDCC/DCC jobs: requested, queued (with position), offered, complete, refused or " +
-        "failed, with the bot's last reply. Pass `job` for one. Jobs keep updating in the " +
-        "background, so this is how to check on a slow bot.",
+        "XDCC/DCC jobs: requested, queued (with position), offered, downloading (with bytes " +
+        "and rate), stalled, complete, refused or failed, with the bot's last reply. Pass " +
+        "`job` for one. Jobs keep updating in the background, so this is how to check on a " +
+        "slow bot or a long transfer.",
       inputSchema: dccStatusSchema.shape,
     },
     ({ session, job }: DccStatusArgs) =>
-      guarded(() => {
+      guarded(async () => {
         const s = sessionOf(registry, session);
+        // Fresh numbers rather than up to one poll interval old.
+        await s.pollTransfers();
         if (job !== undefined) {
           const found = s.dcc.get(job);
           if (!found) return failure(bridgeError("dcc_failed", `no DCC job named "${job}".`));
+          const next = jobAdvice(found);
           return json({
             job: found,
             downloading: describeDownload(found) ?? null,
+            progress: describeProgress(found) ?? null,
+            ...(found.state === "requested" || found.state === "queued" ? botSaid(found) : {}),
+            ...(next ? { next } : {}),
             mircAccepts: s.sreq ?? null,
           });
         }
@@ -1075,9 +1144,9 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     "irc_dcc_watch",
     {
       description:
-        "Wait until a DCC job changes state (queued, offered, complete, refused, failed), at most " +
-        "55 s, then report it. Call again to keep waiting: transfers and busy bots can take " +
-        "far longer than one call may wait.",
+        "Wait until a DCC job changes state (queued, offered, downloading, stalled, complete, " +
+        "refused, failed), at most 55 s, then report it with its progress. Call again to keep " +
+        "waiting: transfers and busy bots can take far longer than one call may wait.",
       inputSchema: dccWatchSchema.shape,
     },
     ({ session, job, timeoutMs }: DccWatchArgs) =>
@@ -1090,18 +1159,27 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
             : json({ changed: false, note: "no active DCC job to watch", jobs: s.dcc.list() });
         }
         const from = target.state;
+        const heard = target.lastReplyTs;
+        // A new reply wakes the watch even when it moves nothing: a refusal in a
+        // language the daemon cannot read must still reach the agent, which can.
         const changed = await waitForJob(
           s,
           target,
-          (j) => j.state !== from,
+          (j) => j.state !== from || j.lastReplyTs !== heard,
           timeoutMs ?? 50_000,
         );
         if (!changed && s.closed.aborted) return linkDropped();
+        const next = jobAdvice(target);
+        const newReply = target.lastReplyTs !== heard;
         return json({
           changed,
           from,
+          ...(newReply ? { why: target.state !== from ? "state and reply" : "bot replied" } : {}),
           job: target,
           downloading: describeDownload(target) ?? null,
+          progress: describeProgress(target) ?? null,
+          ...(newReply ? botSaid(target) : {}),
+          ...(next ? { next } : {}),
           ...(changed ? {} : { note: "no change yet; call again to keep waiting" }),
         });
       }),
@@ -1118,7 +1196,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         "the user asked, or the file is clearly not what they asked for.",
       inputSchema: xdccCancelSchema.shape,
     },
-    ({ session, job, confirm }: XdccCancelArgs) =>
+    ({ session, job, confirm, tellBot }: XdccCancelArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
         const target = job !== undefined ? s.dcc.get(job) : s.dcc.active().at(-1);
@@ -1152,7 +1230,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         // marked first, that failure is recognised as this cancel. Nothing can
         // finish the job between the check and this line.
         s.dcc.cancel(target, "cancelled on request");
-        if (bot && cid !== undefined) {
+        if (bot && cid !== undefined && tellBot !== false) {
           // What a person types: REMOVE leaves the queue, CANCEL stops a send.
           const words = wasState === "queued" ? "XDCC REMOVE" : "XDCC CANCEL";
           const told = await s.commands.send("msg", { cid, target: bot, text: words }, {
@@ -1160,7 +1238,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           });
           steps.push(told.ok ? `told ${bot}: ${words}` : `could not tell ${bot}`);
         }
-        if (wasState === "offered") {
+        if (TRANSFER_DCC_STATES.has(wasState)) {
           // The transfer may already be running in mIRC; close its download.
           const nick = bot ?? target.sender;
           if (nick) {
@@ -1297,6 +1375,23 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           return await fail(bridgeError("dcc_failed", acceptance(s)));
         }
 
+        // Already asked and still going: a second request only gets "already
+        // requested" back, and its job would wait forever. An ended job is
+        // different: asking again is how a broken transfer is resumed.
+        const existing = s.dcc.activeRequest(net.cid, bot, pack);
+        if (existing) {
+          const downloading = describeDownload(existing);
+          return json({
+            skipped: true,
+            reason: `pack ${pack} was already requested from ${bot}; this is that job`,
+            job: existing,
+            ...(downloading ? { downloading } : {}),
+            progress: describeProgress(existing) ?? null,
+            next: jobAdvice(existing) ??
+              "Nothing was sent to the bot. Follow the existing job with irc_dcc_watch.",
+          });
+        }
+
         // 2. joined?
         if (!s.state.isJoined(net, channel)) {
           const joined = await s.commands.send("join", { cid: net.cid, channel }, {
@@ -1338,6 +1433,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         steps.push("requested");
 
         // 5. wait, briefly, for the bot to answer or the offer to arrive.
+        const deadline = Date.now() + waitMs;
         await waitForJob(
           s,
           job,
@@ -1345,6 +1441,35 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           waitMs,
         );
         if (s.closed.aborted) return linkDropped();
+        // Bots announce before they offer, and the offer is what names the file.
+        // Seen live: an Italian "sending you" line the classifier could not read
+        // ended the wait 300 ms before the offer, every time.
+        if (job.state === "requested") {
+          await waitForJob(
+            s,
+            job,
+            (j) => j.state !== "requested",
+            Math.min(OFFER_GRACE_MS, Math.max(0, deadline - Date.now())),
+          );
+          if (s.closed.aborted) return linkDropped();
+        }
+        // When mIRC already has the file it asks to resume, and the bot's ACCEPT
+        // follows the offer by about a second (0.6–1 s live). Waiting that long
+        // lets the answer say "resume", or "you already have it" when the
+        // re-check finishes at once, instead of "starting".
+        if (job.state === "offered") {
+          await waitForJob(
+            s,
+            job,
+            (j) => j.resumedFrom !== undefined || j.state !== "offered",
+            Math.min(RESUME_GRACE_MS, Math.max(0, deadline - Date.now())),
+          );
+          // A re-check of a complete file ends within about a second; wait for it.
+          if (alreadyHad(job) && job.state === "offered") {
+            await waitForJob(s, job, (j) => j.state !== "offered", RESUME_GRACE_MS);
+          }
+          if (s.closed.aborted) return linkDropped();
+        }
 
         if (job.state === "refused") {
           const verdict = classifyBotReply(job.detail ?? "");
@@ -1363,14 +1488,23 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
           );
         }
 
-        const next = job.state === "offered"
-          ? `The transfer is starting: ${acceptance(s)} Follow it with irc_dcc_watch.`
+        const next = alreadyHad(job)
+          ? "mIRC already had this whole file, so it only re-checked the end; nothing new is " +
+            "being downloaded. Tell the user they already have it."
+          : job.state === "offered"
+          ? `The transfer is starting${
+            job.resumedFrom !== undefined ? " as a resume of the file mIRC already has" : ""
+          }: ${acceptance(s)} Follow it with irc_dcc_watch.`
+          : job.state === "complete"
+          ? "The transfer has already finished."
+          : job.state === "failed"
+          ? "The transfer failed at once; see detail. Asking again resumes from what is saved."
           : job.state === "queued"
           ? `Queued${job.position ? ` at position ${job.position}` : ""}: the bot will send ` +
             "when your turn comes, which can take a long time. Follow it with irc_dcc_watch."
           : job.lastReply
-          ? "The bot answered, but not in a way the daemon recognises; see lastReply. The job " +
-            "keeps listening."
+          ? "The bot answered but has not offered the file yet; see botSaid. The job keeps " +
+            "listening."
           : `No answer from ${bot} yet. Busy bots can take minutes; the job keeps listening, ` +
             "so check back with irc_dcc_watch rather than asking again.";
         const downloading = describeDownload(job);
@@ -1385,6 +1519,8 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
             : {}),
           job,
           steps,
+          // Only while the bot's words are all there is to go on.
+          ...(job.state === "requested" || job.state === "queued" ? botSaid(job) : {}),
           mircAccepts: s.sreq ?? null,
           next,
         });

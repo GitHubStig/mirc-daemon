@@ -522,3 +522,93 @@ Deno.test("a DCC SEND offer, framed as bridge.mrc's on CTCP frames it, opens the
     await h.stop();
   }
 });
+
+Deno.test("the gets reply bridge_getspayload builds moves a transfer to downloading", async () => {
+  const h = await attach();
+  try {
+    const session = h.session()!;
+    const job = session.dcc.start({ cid: 1, net: "net1", bot: "WG|LinuxOs|01", pack: "1" });
+    h.mirc.sendLine(
+      `{"t":"ev","kind":"ctcp","cid":1,"net":"net1","nick":"WG|LinuxOs|01",` +
+        `"extra":{"ctcp":"DCC","text":${mslJstr('SEND "debian 12.iso" 1 5000 661651456')}}}`,
+    );
+    await until(() => job.state === "offered", { label: "offer" });
+
+    const polled = session.pollTransfers();
+    const cmd = await h.mirc.nextCommand("gets");
+    // Exactly as the mSL builds it: numbers bare, done as 0/1 from bridge_number.
+    h.mirc.sendLine(
+      `{"t":"res","id":"${cmd.id}","ok":true,"data":{"gets":[` +
+        `{"nick":${mslJstr("WG|LinuxOs|01")},"file":${mslJstr("debian 12.iso")},` +
+        `"size":661651456,"rcvd":1048576,"cps":524288,"done":0}]}}`,
+    );
+    await polled;
+    assertEquals(job.state, "downloading");
+    assertEquals(job.rcvd, 1048576);
+    assertEquals(job.cps, 524288);
+  } finally {
+    await h.stop();
+  }
+});
+
+Deno.test("the gets frame mIRC really sent: empty nicks, a finished window listed first", async () => {
+  // Verbatim from the log, 2026-10-23, from the first script version, which read
+  // $get(N).nick (empty in mIRC 7.85) and .done (0 even for the finished one).
+  const h = await attach();
+  try {
+    const session = h.session()!;
+    const iso = "ubuntu-mate-16.04.4-desktop-amd64.iso";
+    const job = session.dcc.start({
+      cid: 1,
+      net: "net1",
+      bot: "VoLtAgE|SoFT-LiNUX|04",
+      pack: "39",
+    });
+    h.mirc.send({
+      t: "ev",
+      kind: "ctcp",
+      cid: 1,
+      net: "net1",
+      nick: "VoLtAgE|SoFT-LiNUX|04",
+      extra: { ctcp: "DCC", text: `SEND ${iso} 3281708755 42617 1746124800` },
+    });
+    await until(() => job.state === "offered", { label: "offer" });
+    const polled = session.pollTransfers();
+    const cmd = await h.mirc.nextCommand("gets");
+    h.mirc.sendLine(
+      `{"t":"res","id":"${cmd.id}","ok":true,"data":{"gets":[` +
+        `{"nick":"","file":"${iso}","size":1746124800,"rcvd":1746124800,"cps":2052176,"done":0},` +
+        `{"nick":"","file":"${iso}","size":1746124800,"rcvd":1716829772,"cps":2175271,"done":0}]}}`,
+    );
+    await polled;
+    // The live window, not the finished one at full size.
+    assertEquals(job.rcvd, 1716829772);
+    assertEquals(job.state, "downloading");
+  } finally {
+    await h.stop();
+  }
+});
+
+Deno.test("an empty gets reply (no downloads open) parses and changes nothing", async () => {
+  const h = await attach();
+  try {
+    const session = h.session()!;
+    const job = session.dcc.start({ cid: 1, net: "net1", bot: "Bot", pack: "1" });
+    h.mirc.send({
+      t: "ev",
+      kind: "ctcp",
+      cid: 1,
+      net: "net1",
+      nick: "Bot",
+      extra: { ctcp: "DCC", text: "SEND a.iso 1 2 10" },
+    });
+    await until(() => job.state === "offered", { label: "offer" });
+    const polled = session.pollTransfers();
+    const cmd = await h.mirc.nextCommand("gets");
+    h.mirc.sendLine(`{"t":"res","id":"${cmd.id}","ok":true,"data":{"gets":[]}}`);
+    assertEquals(await polled, []);
+    assertEquals(job.state, "offered");
+  } finally {
+    await h.stop();
+  }
+});

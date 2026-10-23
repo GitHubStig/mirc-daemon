@@ -1275,6 +1275,231 @@ Deno.test("xdcc_cancel: mIRC reporting the abort before acknowledging it still e
   }
 });
 
+// --- asking again, resumes and progress (seen live, 2026-10-23) ------------------
+
+const ISO = "ubuntu-mate-16.04.4-desktop-amd64.iso";
+const ISO_SIZE = 1746124800;
+
+/**
+ * A bot as irc.williamgattone.it's behaved: an Italian "sending you" line, the
+ * offer 300 ms later, and, when `resumeFrom` is set (mIRC already has some of
+ * the file), the bot's ACCEPT of mIRC's resume.
+ */
+function italianBot(s: Stack, options: { resumeFrom?: number; finish?: boolean } = {}): void {
+  s.fake.setHandler((cmd, fake) => {
+    if (cmd.action === "members") return { ok: true, data: { count: 232, present: true } };
+    if (cmd.action !== "msg") return undefined;
+    const say = (ms: number, f: () => void) => setTimeout(f, ms);
+    say(10, () =>
+      fake.emit("notice", {
+        buf: "Bot",
+        nick: "Bot",
+        text: `** Ti sto inviando il pack #39 ("${ISO}"), che ha grandezza 1.6GB.`,
+      }));
+    say(300, () =>
+      fake.emit("ctcp", {
+        nick: "Bot",
+        extra: { ctcp: "DCC", text: `SEND ${ISO} 3281708755 42617 ${ISO_SIZE}` },
+      }));
+    if (options.resumeFrom !== undefined) {
+      say(900, () =>
+        fake.emit("ctcp", {
+          nick: "Bot",
+          extra: { ctcp: "DCC", text: `ACCEPT ${ISO} 42617 ${options.resumeFrom}` },
+        }));
+    }
+    if (options.finish) {
+      say(
+        1400,
+        () =>
+          fake.emit("dcc", { extra: { event: "complete", file: `F:\\DL\\${ISO}`, from: "Bot" } }),
+      );
+    }
+    return undefined;
+  });
+}
+
+const pack39 = { channel: "#chan", bot: "Bot", pack: "39", timeoutMs: 5000 };
+
+Deno.test("xdcc_fetch waits past a reply it cannot read for the offer that follows", async () => {
+  const s = await stack();
+  try {
+    italianBot(s);
+    const body = JSON.parse(textOf(
+      await s.client.callTool({ name: "xdcc_fetch", arguments: pack39 }),
+    ));
+    assertEquals(body.job.state, "offered");
+    assertEquals(body.downloading, `pack #39 is "${ISO}" (1.6 GB)`);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("asking again for a pack still in progress sends nothing and returns that job", async () => {
+  const s = await stack();
+  try {
+    italianBot(s);
+    const first = JSON.parse(textOf(
+      await s.client.callTool({ name: "xdcc_fetch", arguments: pack39 }),
+    ));
+    const again = JSON.parse(textOf(
+      await s.client.callTool({ name: "xdcc_fetch", arguments: { ...pack39, pack: "#39" } }),
+    ));
+    assertEquals(again.skipped, true);
+    assertEquals(again.job.id, first.job.id);
+    assertEquals(s.fake.received.filter((c) => c.action === "msg").length, 1);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("asking again after a transfer ended is sent, so mIRC can resume it", async () => {
+  const s = await stack();
+  try {
+    italianBot(s, { resumeFrom: 524279808 });
+    const first = JSON.parse(textOf(
+      await s.client.callTool({ name: "xdcc_fetch", arguments: pack39 }),
+    ));
+    await s.client.callTool({ name: "xdcc_cancel", arguments: { job: first.job.id } });
+    const again = JSON.parse(textOf(
+      await s.client.callTool({ name: "xdcc_fetch", arguments: pack39 }),
+    ));
+    assertEquals(again.skipped, undefined);
+    assertEquals(again.job.id !== first.job.id, true);
+    assertEquals(again.job.resumedFrom, 524279808);
+    assertEquals(again.next.includes("resume"), true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("asking for a file mIRC already has says so instead of 'starting'", async () => {
+  const s = await stack();
+  try {
+    italianBot(s, { resumeFrom: ISO_SIZE - 8192, finish: true });
+    const body = JSON.parse(textOf(
+      await s.client.callTool({ name: "xdcc_fetch", arguments: pack39 }),
+    ));
+    assertEquals(body.job.state, "complete");
+    assertEquals(body.next.includes("already had this whole file"), true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("irc_dcc_status asks mIRC for progress and reports a running transfer", async () => {
+  const s = await stack();
+  try {
+    italianBot(s);
+    const fetched = JSON.parse(textOf(
+      await s.client.callTool({ name: "xdcc_fetch", arguments: pack39 }),
+    ));
+    s.fake.setHandler((cmd) =>
+      cmd.action === "gets"
+        ? {
+          ok: true,
+          data: {
+            gets: [{
+              nick: "Bot",
+              file: ISO,
+              size: ISO_SIZE,
+              rcvd: 873062400,
+              cps: 2000000,
+              done: 0,
+            }],
+          },
+        }
+        : undefined
+    );
+    const status = JSON.parse(textOf(
+      await s.client.callTool({ name: "irc_dcc_status", arguments: { job: fetched.job.id } }),
+    ));
+    assertEquals(status.job.state, "downloading");
+    assertEquals(status.progress, "832.6 MB of 1.6 GB (50%), 1.9 MB/s");
+    assertEquals(status.next.includes("irc_dcc_watch"), true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("an older bridge.mrc without gets just means no progress", async () => {
+  const s = await stack();
+  try {
+    italianBot(s);
+    const fetched = JSON.parse(textOf(
+      await s.client.callTool({ name: "xdcc_fetch", arguments: pack39 }),
+    ));
+    s.fake.setHandler((cmd) =>
+      cmd.action === "gets" ? { ok: false, numeric: 0, err: "unknown-action-gets" } : undefined
+    );
+    const status = await s.client.callTool({
+      name: "irc_dcc_status",
+      arguments: { job: fetched.job.id },
+    });
+    assertEquals(status.isError ?? false, false);
+    assertEquals(JSON.parse(textOf(status)).job.state, "offered");
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("a reply the daemon cannot read wakes irc_dcc_watch and is handed to the agent", async () => {
+  const s = await stack();
+  try {
+    botAnswers(s, undefined);
+    const body = JSON.parse(textOf(
+      await s.client.callTool({ name: "xdcc_fetch", arguments: { ...fetchArgs, timeoutMs: 600 } }),
+    ));
+    const watching = s.client.callTool({
+      name: "irc_dcc_watch",
+      arguments: { job: body.job.id, timeoutMs: 3000 },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    // A refusal, in Portuguese.
+    s.fake.emit("notice", {
+      buf: "Bot",
+      nick: "Bot",
+      text: "** Pedido recusado, tente mais tarde",
+    });
+    const watched = JSON.parse(textOf(await watching));
+    assertEquals(watched.changed, true);
+    assertEquals(watched.why, "bot replied");
+    assertEquals(watched.job.state, "requested");
+    assertEquals(watched.botSaid, {
+      text: "** Pedido recusado, tente mais tarde",
+      understood: false,
+    });
+    assertEquals(watched.readIt.includes("tellBot: false"), true);
+
+    // The agent read it as a refusal and closes the job without messaging the bot.
+    const closed = JSON.parse(textOf(
+      await s.client.callTool({
+        name: "xdcc_cancel",
+        arguments: { job: body.job.id, tellBot: false },
+      }),
+    ));
+    assertEquals(closed.job.state, "cancelled");
+    assertEquals(s.fake.received.filter((c) => c.action === "msg").length, 1);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("a reply the daemon understands says so, and gives no reading advice", async () => {
+  const s = await stack();
+  try {
+    botAnswers(s, "** You have been queued in position 2");
+    const body = JSON.parse(textOf(
+      await s.client.callTool({ name: "xdcc_fetch", arguments: { ...fetchArgs, timeoutMs: 3000 } }),
+    ));
+    assertEquals(body.botSaid.understood, true);
+    assertEquals(body.botSaid.as, "queued");
+    assertEquals(body.readIt, undefined);
+  } finally {
+    await s.stop();
+  }
+});
+
 Deno.test("two connections on one network: cid picks one, the name alone is refused", async () => {
   const s = await stack();
   try {
