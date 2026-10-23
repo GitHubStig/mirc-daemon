@@ -1976,8 +1976,10 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     "xdcc_search",
     {
       description:
-        "Search for a file with a channel's search trigger (e.g. !search), as a person would " +
-        "when a pack number from a website turns out to be the wrong file. It says the search " +
+        "Search a channel for files, with its search command (!search, @find, ...): use this, " +
+        "not irc_send, for any search in a channel, since the results come back privately " +
+        "and this collects them. For example when a pack number from a website turns out to be " +
+        "the wrong file. It says the search " +
         "in the channel, visibly and under the user's nick, so use it only when the user wants " +
         "something found. Joins the channel if needed and takes the trigger from its topic " +
         "unless given. Search bots can take minutes to answer; if nothing has come back in " +

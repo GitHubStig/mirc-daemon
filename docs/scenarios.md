@@ -138,3 +138,18 @@ Every round-1 fix showed up in use: `irc_history` for the read, `irc_connect` wi
 6. **Modes**: passed on the tools; "remove that" was read as "get rid of the channel", so `-i` was
    skipped. The wording is fixed above.
 7. **History**: not a test: same session as 1, answered from memory. Run it fresh.
+
+### Round 3: Claude Haiku, a fresh session, 2026-10-23
+
+- **Scenario 4, search** ("linux mint", varied so the channel does not see the same test twice):
+  passed on the outcome. It still typed `!search` with `irc_send`, but `irc_send`'s new warning sent
+  it to `irc_wait_for {direct: true}`, and it caught the bot's private "no results" reply. It
+  noticed NickServ renaming the agent's connection to a Guest nick, and said so without acting.
+  Change: `xdcc_search`'s description now opens with what a user asks for ("Search a channel for
+  files...; use this, not irc_send").
+- **Scenario 4 again**, a fresh session after that change ("fedora workstation"): a full pass.
+  `xdcc_search`, `pending` after 50 s, then `xdcc_search_results` twice with the same cursor and no
+  second search; the bot answered after about 1 min 55 s. It reused the Rizon connection and channel
+  already there.
+- **Scenario 7, history**, fresh session: passed. `irc_history`, an accurate summary, and this time
+  it said it had read only the newest 48 lines, and offered to page back.
