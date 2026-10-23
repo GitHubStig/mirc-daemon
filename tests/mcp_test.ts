@@ -1107,10 +1107,7 @@ Deno.test("a bot command sent into a channel comes back with where to look for t
   const s = await stack();
   try {
     const cmd = JSON.parse(textOf(
-      await s.client.callTool({
-        name: "irc_send",
-        arguments: { target: "#chan", text: "!search debian" },
-      }),
+      await s.client.callTool({ name: "irc_send", arguments: { target: "#chan", text: "!help" } }),
     ));
     assertEquals(cmd.warnings[0].hint.includes("xdcc_search"), true);
     assertEquals(cmd.warnings[0].hint.includes("direct: true"), true);
@@ -1119,6 +1116,36 @@ Deno.test("a bot command sent into a channel comes back with where to look for t
       await s.client.callTool({ name: "irc_send", arguments: { target: "#chan", text: "hi all" } }),
     ));
     assertEquals(chat.warnings, []);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("irc_send refuses a typed search, and a channel mIRC is not in, before sending", async () => {
+  // Live: a model typed "!search ..." into a channel it had not joined; the
+  // server's 404 came only after the tool had said ok.
+  const s = await stack();
+  try {
+    const search = textOf(
+      await s.client.callTool({
+        name: "irc_send",
+        arguments: { target: "#chan", text: "!search debian" },
+      }),
+    );
+    assertEquals(search.startsWith("guard_denied:"), true);
+    assertEquals(search.includes('xdcc_search {channel: "#chan"'), true);
+    assertEquals(search.includes('trigger: "!search"'), true);
+
+    const outside = textOf(
+      await s.client.callTool({ name: "irc_send", arguments: { target: "#other", text: "hi" } }),
+    );
+    assertEquals(outside.startsWith("not_on_channel:"), true);
+    assertEquals(outside.includes("irc_join"), true);
+    assertEquals(s.fake.received.some((c) => c.action === "msg"), false);
+
+    // A nick is not a channel: messaging a bot needs no join.
+    await s.client.callTool({ name: "irc_send", arguments: { target: "Bot", text: "hi" } });
+    assertEquals(s.fake.received.filter((c) => c.action === "msg").length, 1);
   } finally {
     await s.stop();
   }
@@ -2431,7 +2458,10 @@ Deno.test("join, send and raw take a cid too, so either of two connections can b
       name: "irc_raw",
       arguments: { cid: 2662, line: "MODE #t +i", confirm: true },
     });
-    await s.client.callTool({ name: "irc_send", arguments: { cid: 1, target: "#t", text: "hi" } });
+    await s.client.callTool({
+      name: "irc_send",
+      arguments: { cid: 1, target: "#chan", text: "hi" },
+    });
     const sent = s.fake.received.filter((c) => ["join", "raw", "msg"].includes(c.action));
     assertEquals(sent.map((c) => [c.action, c.params?.cid]), [
       ["join", 2662],

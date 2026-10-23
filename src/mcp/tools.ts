@@ -1689,6 +1689,33 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
       guarded(async () => {
         const s = sessionOf(registry, session);
         const net = await targetOf(s, network, stateFreshnessMs, cid);
+        if (isChannelBuffer(target)) {
+          // Refused before sending, not warned about after: seen with two
+          // models, a hand-typed search was never followed up, and a warning
+          // on success did not stop them. xdcc_search collects the results.
+          const search = /^([!@](?:search|find))\b/i.exec(text);
+          if (search) {
+            return failure(
+              bridgeError(
+                "guard_denied",
+                `that is a search, and nothing was sent. Use xdcc_search {channel: "${target}", ` +
+                  `network: "${net.name}", query, trigger: "${search[1]}"}: it joins the ` +
+                  "channel, says the search, and collects the results, which come privately.",
+              ),
+            );
+          }
+          // Seen live: sent to a channel mIRC had not joined, it was refused by
+          // the server (404) only after the tool had reported success.
+          if (!s.state.isJoined(net, target)) {
+            return failure(
+              bridgeError(
+                "not_on_channel",
+                `mIRC is not in ${target} on ${net.name}, so nothing was sent: the server ` +
+                  "would refuse it. Join it first with irc_join.",
+              ),
+            );
+          }
+        }
         const action = notice === true ? "notice" : "msg";
         const outcome = await s.commands.send(action, { cid: net.cid, target, text }, {
           context: "message",

@@ -258,3 +258,14 @@ Scenarios 1 to 5 in one `pi` session (Gemma 4 12B, Q4, on Ollama, thinking off),
    was not there, `#FILES` was left again, and the agent said so.
 3. **Clean up (5)**: passed. One `irc_cleanup` call disconnected the agent's Rizon connection and
    closed its window; EFnet and `#home!` untouched.
+
+### `pi` round 6, 2026-10-23: scenario 4, a fresh session
+
+- **Search**: failed. It connected to Rizon by name, then, against its own plan two steps earlier,
+  typed `!search uberstudent` with `irc_send` into #FILES-CHAT, which mIRC had not joined. The
+  server refused it (`404 Cannot send to channel`), but only after `irc_send` had answered ok with
+  its "looks like a bot command" warning; the model's thinking then collapsed into a repeated token.
+  Fixed: `irc_send` refuses before sending, both a search command typed into a channel (`!search`,
+  `@find`, ...), pointing at `xdcc_search` with the channel, network and trigger filled in, and
+  anything sent to a channel mIRC is not in (`not_on_channel`, join first). Haiku's round 2 had made
+  the same hand-typed search; a warning after the send stopped neither model.

@@ -2,7 +2,7 @@
   "tasks": {
     "dev": "deno run --watch --allow-net --allow-env --allow-read --allow-write=logs src/main.ts",
     "start": "deno run --allow-net --allow-env --allow-read --allow-write=logs src/main.ts",
-    "test": "deno test -A tests/",
+    "test": "deno test -A --parallel tests/",
     "check": "deno check src/main.ts scripts/ tests/",
     "token": "deno run --allow-read --allow-write=mirc scripts/token.ts",
     "log:tail": "deno run --allow-read=logs scripts/log_tail.ts",
