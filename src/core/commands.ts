@@ -79,14 +79,32 @@ interface Pending {
   context: OutcomeContext;
   startedTs: number;
   timer: ReturnType<typeof setTimeout>;
+  probe?: ReturnType<typeof setTimeout>;
   resolve: (outcome: CommandOutcome) => void;
 }
+
+/**
+ * Telling a slow command from a stuck mIRC. If mIRC has hung, or the link to
+ * it is dead without having closed, every command just times out; saying so
+ * turns a vague timeout into something the agent can ask the user to check.
+ * (mIRC's Options dialog does not stop it: commands ran with it open.)
+ */
+export interface Liveness {
+  /** A command has gone unanswered for a while: check mIRC is alive. */
+  probe(): void;
+  /** Why mIRC may not have answered a command sent at `sinceTs`; undefined if it seems alive. */
+  explainSilence(sinceTs: number): string | undefined;
+}
+
+/** When to probe an unanswered command; most answer in milliseconds. */
+const PROBE_AFTER_MS = 3000;
 
 export interface CommandDispatcherOptions {
   write: (frame: CmdFrame) => void;
   maxInFlight?: number;
   defaultTimeoutMs?: number;
   log?: LogSink;
+  liveness?: Liveness;
 }
 
 export class CommandDispatcher {
@@ -98,12 +116,14 @@ export class CommandDispatcher {
   #log?: LogSink;
   #closed = false;
   #closeReason?: string;
+  #liveness?: Liveness;
 
   constructor(options: CommandDispatcherOptions) {
     this.#write = options.write;
     this.#gate = new Gate(options.maxInFlight ?? DEFAULT_MAX_IN_FLIGHT);
     this.#defaultTimeoutMs = options.defaultTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
     this.#log = options.log;
+    this.#liveness = options.liveness;
   }
 
   /** Commands sent and not yet answered. */
@@ -137,25 +157,42 @@ export class CommandDispatcher {
     const context = options.context ?? "generic";
 
     return await new Promise<CommandOutcome>((resolve) => {
+      const startedTs = Date.now();
       const timer = setTimeout(() => {
+        const entry = this.#pending.get(id);
+        if (entry?.probe !== undefined) clearTimeout(entry.probe);
         this.#pending.delete(id);
         this.#gate.release();
-        this.#log?.warn("action.outcome", { id, action, code: "timeout", waitedMs: timeoutMs });
+        const silence = this.#liveness?.explainSilence(startedTs);
+        this.#log?.warn("action.outcome", {
+          id,
+          action,
+          code: "timeout",
+          waitedMs: timeoutMs,
+          ...(silence ? { mircSilent: true } : {}),
+        });
         resolve({
           ok: false,
           error: bridgeError(
             "timeout",
-            `mIRC did not answer the "${action}" command within ${Math.round(timeoutMs / 1000)}s.`,
+            `mIRC did not answer the "${action}" command within ${Math.round(timeoutMs / 1000)}s.` +
+              (silence ? ` ${silence}` : ""),
           ),
         });
       }, timeoutMs);
+      // Ask mIRC for a sign of life well before the timeout, so the timeout
+      // can say whether mIRC is up and ignoring this, or not running at all.
+      const probe = this.#liveness
+        ? setTimeout(() => this.#liveness?.probe(), Math.min(PROBE_AFTER_MS, timeoutMs / 2))
+        : undefined;
 
-      this.#pending.set(id, { action, context, startedTs: Date.now(), timer, resolve });
+      this.#pending.set(id, { action, context, startedTs, timer, probe, resolve });
 
       try {
         this.#write({ t: "cmd", id, action, params });
       } catch (err) {
         clearTimeout(timer);
+        if (probe !== undefined) clearTimeout(probe);
         this.#pending.delete(id);
         this.#gate.release();
         // An oversized frame is the caller's input, not a broken link, and an
@@ -181,6 +218,7 @@ export class CommandDispatcher {
       return;
     }
     clearTimeout(entry.timer);
+    if (entry.probe !== undefined) clearTimeout(entry.probe);
     this.#pending.delete(frame.id);
     this.#gate.release();
 
@@ -201,6 +239,7 @@ export class CommandDispatcher {
     this.#closeReason = reason;
     for (const [id, entry] of this.#pending) {
       clearTimeout(entry.timer);
+      if (entry.probe !== undefined) clearTimeout(entry.probe);
       entry.resolve({
         ok: false,
         error: bridgeError(

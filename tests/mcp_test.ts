@@ -38,7 +38,9 @@ interface Stack {
  * agent door, and the SDK's own client speaking to it over HTTP. This is the
  * closest thing to the real deployment that runs without mIRC present.
  */
-async function stack(options: { allowRaw?: boolean; log?: LogSink } = {}): Promise<Stack> {
+async function stack(
+  options: { allowRaw?: boolean; log?: LogSink; connectWaitMs?: number } = {},
+): Promise<Stack> {
   const mirc = startMircListener({
     hostname: "127.0.0.1",
     port: 0,
@@ -61,6 +63,7 @@ async function stack(options: { allowRaw?: boolean; log?: LogSink } = {}): Promi
     startedTs: Date.now(),
     stateFreshnessMs: 5000,
     allowRaw: options.allowRaw ?? false,
+    connectWaitMs: options.connectWaitMs,
   });
 
   const http = startHttpServer({
@@ -1135,6 +1138,39 @@ Deno.test("a connect that fails still leaves the agent owning the window it open
     });
     assertEquals(stopped.isError ?? false, false);
     assertEquals(s.fake.received.find((c) => c.action === "disconnect")?.params?.cid, 50);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("a connect still going when the wait runs out says mIRC is still trying", async () => {
+  // As seen live on EFnet: mIRC works through server after server, each TCP
+  // attempt timing out at 21 s, and the window reads "connecting" throughout.
+  const s = await stack({ connectWaitMs: 300 });
+  try {
+    s.fake.setHandler((cmd, fake) => {
+      if (cmd.action !== "connect") return undefined;
+      fake.setNetworks([
+        network(),
+        network({
+          cid: 60,
+          name: "",
+          server: "irc.efnet.org",
+          status: "connecting",
+          channels: [],
+          members: {},
+        }),
+      ]);
+      return { ok: true, silent: true };
+    });
+    const result = await s.client.callTool({
+      name: "irc_connect",
+      arguments: { server: "irc.efnet.org" },
+    });
+    const text = textOf(result);
+    assertEquals(text.startsWith("connect_timeout:"), true);
+    assertEquals(text.includes("still trying"), true);
+    assertEquals(text.includes("irc_disconnect {cid: 60}"), true);
   } finally {
     await s.stop();
   }

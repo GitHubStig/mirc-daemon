@@ -160,6 +160,9 @@ export class FakeMirc {
           const frame = parseInbound(line) as Record<string, unknown>;
           if (frame.t === "welcome") {
             this.welcome = frame as unknown as WelcomeFrame;
+          } else if (frame.t === "ping") {
+            // As bridge.mrc does: every ping gets a pong.
+            this.send({ t: "pong" });
           } else if (frame.t === "cmd") {
             // Decode params as bridge.mrc does, so tests assert on real values.
             this.#onCommand(fromWireCommand(frame as unknown as CmdFrame));

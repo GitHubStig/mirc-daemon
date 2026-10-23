@@ -24,7 +24,15 @@ export interface ConnectionOptions {
   helloTimeoutMs?: number;
   /** Kinds of message the daemon will relay. */
   relayedKinds?: readonly string[];
+  /**
+   * How often to ping mIRC, so `daemon_status` can say when it has gone quiet.
+   * The link is never closed over a missed ping: mIRC may only be busy, and
+   * closing would throw away the session's DCC jobs and receipts.
+   */
+  heartbeatMs?: number;
 }
+
+const HEARTBEAT_MS = 30_000;
 
 /**
  * Serializes writes onto the socket. `CommandDispatcher` writes synchronously, so
@@ -89,6 +97,7 @@ export async function handleMircConnection(
     if (closed) return;
     closed = true;
     clearTimeout(helloTimer);
+    clearInterval(heartbeat);
     session?.close(reason);
     if (session) registry.remove(session.id);
     writer.close();
@@ -110,7 +119,11 @@ export async function handleMircConnection(
     }
   }, options.helloTimeoutMs ?? 5000);
 
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+
   const onFrame = (frame: InboundFrame): void => {
+    // Anything at all from mIRC shows its scripts are running.
+    session?.heard();
     switch (frame.t) {
       case "hello":
         return onHello(frame);
@@ -160,8 +173,17 @@ export async function handleMircConnection(
       maxInFlight: options.maxInFlight,
       defaultCommandTimeoutMs: options.defaultCommandTimeoutMs,
       bufferCapacity: options.bufferCapacity,
+      ping: () => {
+        try {
+          writer.write({ t: "ping" });
+        } catch {
+          // the socket is closing; close() reports it
+        }
+      },
     });
     registry.add(session);
+    const live = session;
+    heartbeat = setInterval(() => live.ping(), options.heartbeatMs ?? HEARTBEAT_MS);
 
     writer.write({
       t: "welcome",

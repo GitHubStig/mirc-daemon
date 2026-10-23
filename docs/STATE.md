@@ -219,8 +219,28 @@ Proven by running it, with evidence in the log:
   - The window a failed connect opens is now receipted, so the agent owned it, and `irc_disconnect`
     cancelled the retry loop in 44 ms. mIRC printed "Connect canceled".
   - **`on CONNECTFAIL` does not fire** in 7.85: not for timeouts, not for ten instant certificate
-    failures. A connect to an unreachable server therefore ends in the 60 s timeout, whose hint
-    names the agent's window to stop. The handler is kept because it is harmless.
+    failures. The handler is kept because it is harmless.
+- **Slow connects are normal, so they are not cut short** (2026-10-23).
+  - **mIRC reads `connecting` through its own retries.** A dead port read `connecting` for a full
+    minute, never `disconnected`, so no status reading tells "dead" from "next server will answer".
+  - **EFnet is slow to get into from here.** All ten addresses behind `irc.efnet.org` timed out on a
+    plain TCP connect, 21 s each, and the user says mIRC normally works through several before one
+    lets it in, often over a minute.
+  - **A 20 s "still connecting means unreachable" rule was tried and dropped.** It ended dead ports
+    in 20 s, but it also cut off ordinary EFnet connects.
+  - **What `irc_connect` does now.** It waits 50 s, under the ~60 s at which MCP clients give up (it
+    used to wait 60 s and could lose its answer). Then it returns `connect_timeout` saying mIRC is
+    still trying by itself, with how to wait for it or stop it. Seen live: returned at 50 s, and
+    mIRC was connected 30 s later.
+  - **A cancelled or closed window now ends the wait at once.** `bridge_conn_watch` checks the
+    pending connection every 2 s for `disconnected` (cancelled) or a closed window, which raise no
+    event otherwise.
+- **Heartbeat** (2026-10-23). The daemon pings mIRC every 30 s, and `bridge.mrc` answers each ping
+  at once. Any frame from mIRC counts as a sign of life. A command left unanswered for 3 s sends an
+  extra ping, so its timeout can say whether mIRC is up but ignoring it, or sending nothing at all.
+  `daemon_status` shows `mircSilentForSecs` and a hint once a ping has gone unanswered for 5 s. The
+  link is never closed over it. **mIRC's Options dialog does not pause scripts:** with it open,
+  `irc_ison` made a real server round trip in 272 ms.
 - **DCC, end to end, by self-send** (2026-10-22). The user sent files from their EFNet connection to
   an agent-opened second one (`` me2 ``, `cid 1751`).
   - First, nothing arrived at all. Three handlers had the wrong event syntax and had never fired in
@@ -300,7 +320,12 @@ refused job with `xdcc_cancel {tellBot: false}`.
 
 Beyond those:
 
-- **`raw` gating** is implemented as default-deny but only exercised as "denied".
+- **`raw` gating** is default-deny, and tested both ways, but only seen live as "denied". Decided
+  (2026-10-23): keep it. It is the escape hatch for what the tools do not cover (WHOIS, MODE), and
+  off by default is right.
+- **The heartbeat's "silent" path** is unit-tested only: no real hang has been seen. One mSL command
+  at a time also means a pending connect (up to 50 s) holds up every other tool call, the progress
+  poll included. That is known, and not yet worth reworking.
 - **Known gaps, deliberately not built for.** A daemon restart mid-transfer loses the in-memory job.
   mIRC's later "file received" then shows up as a job nobody requested: visible, but no longer tied
   to its request. And events while the bridge link is down are dropped, because mSL does not queue
@@ -431,9 +456,9 @@ minimised **`@bridge`** window, not the active channel. Available while debuggin
 
 1. **Close the remaining live gaps** under "Not verified" when the chance arises: a bot's queue; a
    real stall; the refused-join check, which needs someone holding a `+i` channel.
-2. **Cleanup**: decide whether `--allow-raw` is needed; consider a daemon-side heartbeat so a dead
-   link is noticed without waiting on TCP. `on *:CONNECTFAIL:` is documented as not firing, and a
-   connect to a dead server still costs the full 60 s timeout. Find another signal if that matters.
+2. **Maybe**: let other commands through while a connect waits (it holds mIRC's one command slot for
+   up to 50 s). That needs care: the connect, join, part and nick replies each use one pending
+   variable in `bridge.mrc`, and the single slot is what keeps them from colliding.
 
 ## Shape of the thing
 

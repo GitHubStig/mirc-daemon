@@ -540,6 +540,7 @@ alias -l bridge_do_connect {
     set -e %bridge_conn_cid $cid
     if ($6- != $null) server $2 %port $6-
     else server $2 %port
+    .timerbridgeconnwatch 0 2 bridge_conn_watch
     return
   }
   var %before = $bridge_cids
@@ -551,10 +552,40 @@ alias -l bridge_do_connect {
     inc %i
   }
   if (%new == $null) { bridge_fail $1 0 no-new-connection | return }
-  ; A refusal arrives as that connection's DISCONNECT; a silent stall times out
-  ; on the daemon.
+  ; A refusal after registering starts arrives as that connection's DISCONNECT;
+  ; an attempt that never gets that far is caught by bridge_conn_watch.
   set -e %bridge_conn_id $1
   set -e %bridge_conn_cid %new
+  .timerbridgeconnwatch 0 2 bridge_conn_watch
+}
+
+; While a connect is pending, look at its connection every 2 s, to answer at
+; once when the attempt ends without connecting: the window was closed, or the
+; attempt was cancelled (by the user, or by irc_disconnect) and reads
+; "disconnected". Neither raises CONNECT or DISCONNECT, so the daemon would
+; otherwise wait out its timeout.
+; It deliberately does NOT judge a slow attempt. Through mIRC's own retries a
+; window stays "connecting" (seen live for a full minute), and that is normal:
+; irc.efnet.org lists ten servers, every one of which timed out from here after
+; 21 s, and mIRC rotates through several before one lets it in, often taking
+; over a minute. Cutting that short broke ordinary EFnet connects, so a slow
+; connect is left to the daemon's timeout, which says mIRC is still trying.
+alias bridge_conn_watch {
+  if (!$var(%bridge_conn_id)) { .timerbridgeconnwatch off | return }
+  var %id = %bridge_conn_id, %cid = %bridge_conn_cid
+  if (!$bridge_hascid(%cid)) {
+    .timerbridgeconnwatch off
+    unset %bridge_conn_id %bridge_conn_cid
+    bridge_fail %id 0 connection-failed
+    return
+  }
+  scid %cid
+  var %st = $status
+  scid -r
+  if (%st != disconnected) return
+  .timerbridgeconnwatch off
+  unset %bridge_conn_id %bridge_conn_cid
+  bridge_fail %id 0 connection-failed
 }
 
 ; $1 = id, $2 = the new nick. Answered by our own NICK event on this
@@ -672,8 +703,8 @@ on *:CONNECT: {
 ; mIRC goes on retrying by itself; the agent can stop it with irc_disconnect.
 ; NOT WORKING in mIRC 7.85 (2026-10-22): it fired for none of ten instant TLS
 ; failures ("SSL certificate verify failed") nor for connection timeouts. Kept
-; because it is harmless if it never fires; a failed connect therefore still
-; ends in the daemon's 60 s timeout, whose hint names the window to stop.
+; because it is harmless if it never fires; bridge_conn_watch catches what it
+; would have.
 on *:CONNECTFAIL: {
   if ($sock(bridge)) bridge_send $evp(conn) $+ $chr(44) $+ $kvo(extra, $chr(123) $+ $kvo(event, $jstr(connect_failed)) $+ $chr(44) $+ $kvo(reason, $jstr($1-)) $+ $chr(125)) $+ $chr(125)
   if ($var(%bridge_conn_id) && $cid == %bridge_conn_cid) {

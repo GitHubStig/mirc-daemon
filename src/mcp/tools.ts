@@ -28,7 +28,7 @@ import {
   sameNetwork,
   TRANSFER_DCC_STATES,
 } from "../core/types.ts";
-import type { Session, SessionRegistry } from "../core/sessions.ts";
+import { type Session, type SessionRegistry, silenceHint } from "../core/sessions.ts";
 import { emptyChannelWarning } from "../core/outcomes.ts";
 import { waitForEvent, type WaitMatcher } from "../core/waits.ts";
 import { classifyBotReply } from "../core/xdcc.ts";
@@ -43,6 +43,8 @@ export interface ToolOptions {
   stateFreshnessMs: number;
   /** ADR-0006: raw server lines are denied unless explicitly allowed. */
   allowRaw: boolean;
+  /** How long a connect is waited for; tests shorten it. */
+  connectWaitMs?: number;
 }
 
 interface ToolResult {
@@ -203,6 +205,9 @@ const MAX_WAIT_MS = 55_000;
  * something it could not classify. The offer followed within 300 ms live.
  */
 const OFFER_GRACE_MS = 5_000;
+
+/** How long a connect is waited for before reporting that mIRC is still trying. */
+const CONNECT_WAIT_MS = 50_000;
 
 /** How long xdcc_fetch waits after the offer for a resume's ACCEPT (and its end). */
 const RESUME_GRACE_MS = 2_500;
@@ -533,6 +538,7 @@ type RawArgs = z.infer<typeof rawSchema>;
 
 export function registerTools(server: McpServer, options: ToolOptions): void {
   const { registry, stateFreshnessMs, allowRaw } = options;
+  const connectWaitMs = options.connectWaitMs ?? CONNECT_WAIT_MS;
 
   /**
    * Register one tool, logging every invocation.
@@ -588,14 +594,19 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     "daemon_status",
     {
       description:
-        "Daemon health: uptime, whether mIRC is attached, session id and active DCC jobs.",
+        "Daemon health: uptime, whether mIRC is attached and answering, session id and active " +
+        "DCC jobs.",
       inputSchema: emptySchema.shape,
     },
     (_args: EmptyArgs) =>
       guarded(() => {
         const sessions = registry.list();
         const sole = registry.resolve();
+        const silentMs = sole?.silentForMs();
         const status: DaemonStatus = {
+          ...(silentMs !== undefined
+            ? { mircSilentForSecs: Math.round(silentMs / 1000), hint: silenceHint(silentMs) }
+            : {}),
           uptimeSecs: Math.round((Date.now() - options.startedTs) / 1000),
           sessions: sessions.length,
           mircAttached: sessions.length > 0,
@@ -774,8 +785,12 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
       "connect",
       // tls goes as a number: bridge.mrc reads flags with jnum, and only strings are base64.
       { cid: reusable?.cid, server, port, tls: tls ? 1 : undefined, password },
-      // EFNet took 32.6 s to register in the live test: ident and DNS checks.
-      { context: "connect", timeoutMs: 60_000 },
+      // Under MAX_WAIT_MS, or the MCP client gives up first and the answer is
+      // lost. A connect often takes longer: mIRC rotates through a network's
+      // servers (every one of irc.efnet.org's ten timed out from here, 21 s
+      // each) and keeps going after this, so running out is reported as
+      // "still trying", not as failure.
+      { context: "connect", timeoutMs: connectWaitMs },
     );
 
     // Receipts first, success or not. A connection that never registered still
@@ -788,6 +803,28 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
       : s.state.networks().filter((n) => !before.has(n.cid) || n.cid === reusable?.cid);
     for (const n of opened) s.owned.openedConnection(n.cid);
 
+    if (!outcome.ok && outcome.error.code === "timeout") {
+      const trying = opened.find((n) => n.status !== "disconnected") ??
+        (reusable ? s.state.byCid(reusable.cid) : undefined);
+      const stop = trying === undefined
+        ? ""
+        : s.owned.ownsConnection(trying.cid)
+        ? ` To give up, irc_disconnect {cid: ${trying.cid}}; that window is the agent's.`
+        : ` To give up, irc_disconnect {cid: ${trying.cid}, confirm: true}, but that window is ` +
+          "the user's, so only if they agree.";
+      return failure(
+        bridgeError(
+          "connect_timeout",
+          `mIRC has not finished connecting to ${server} after ${
+            Math.round(connectWaitMs / 1000)
+          } s, and ` +
+            "is still trying by itself. That is often normal: mIRC works through a network's " +
+            "servers until one lets it in, which on EFnet can take over a minute. Check " +
+            `irc_get_state in a little while, or wait for it with irc_wait_for {kind: "conn"}.` +
+            stop,
+        ),
+      );
+    }
     if (!outcome.ok) {
       const left = opened.find((n) => n.status !== "disconnected");
       return failure(

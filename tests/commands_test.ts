@@ -192,3 +192,38 @@ Deno.test("a frame too large to send is too_long, not a dropped connection", asy
   // The credit is returned, so the next command is not stuck behind it.
   assertEquals(dispatcher.outstanding, 0);
 });
+
+Deno.test("an unanswered command asks mIRC for a sign of life, and its timeout says why", async () => {
+  const probes: number[] = [];
+  const dispatcher = new CommandDispatcher({
+    write: () => {},
+    defaultTimeoutMs: 80,
+    liveness: {
+      probe: () => probes.push(Date.now()),
+      explainSilence: () => "mIRC has sent nothing for 9 s, not even an answer to a ping.",
+    },
+  });
+  const outcome = await dispatcher.send("join", { channel: "#chan" });
+  assertEquals(probes.length, 1);
+  assertEquals(outcome.ok, false);
+  if (!outcome.ok) {
+    assertEquals(outcome.error.code, "timeout");
+    assertEquals(outcome.error.hint.endsWith("not even an answer to a ping."), true);
+  }
+});
+
+Deno.test("an answered command is never probed", async () => {
+  let probes = 0;
+  const written: CmdFrame[] = [];
+  const dispatcher = new CommandDispatcher({
+    write: (frame) => written.push(frame),
+    defaultTimeoutMs: 200,
+    liveness: { probe: () => probes++, explainSilence: () => undefined },
+  });
+  const pending = dispatcher.send("join", { channel: "#chan" });
+  await tick();
+  dispatcher.handleRes({ t: "res", id: written[0].id, ok: true });
+  await pending;
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assertEquals(probes, 0);
+});

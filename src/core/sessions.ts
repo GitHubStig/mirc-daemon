@@ -47,7 +47,15 @@ export interface SessionOptions {
   progressIntervalMs?: number;
   /** No new bytes for this long and a download counts as stalled. */
   stallAfterMs?: number;
+  /** Send mIRC a ping frame; bridge.mrc answers each with a pong. */
+  ping?: () => void;
 }
+
+/**
+ * A ping unanswered this long means mIRC is not running scripts. Pongs came
+ * back in milliseconds live, and kept coming with mIRC's Options dialog open.
+ */
+const SILENT_AFTER_MS = 5_000;
 
 /**
  * Often enough that a stall shows within the minute it takes to call it one,
@@ -78,6 +86,14 @@ function toGets(data: Record<string, unknown> | undefined): DccGet[] {
     });
 }
 
+/** What to tell the agent when mIRC has gone quiet, pings included. */
+export function silenceHint(silentMs: number): string {
+  return `mIRC has sent nothing for ${Math.round(silentMs / 1000)} s, not even an answer to a ` +
+    "ping, so it is not running its scripts: it may be frozen or busy, or the link to it may " +
+    "be dead without having closed. Ask the user to check mIRC (/bridge.diag shows the " +
+    "bridge's state), then try again.";
+}
+
 export class Session {
   readonly id: string;
   readonly connectedTs = Date.now();
@@ -96,6 +112,11 @@ export class Session {
   #progressIntervalMs: number;
   #progressTimer?: ReturnType<typeof setInterval>;
   #polling = false;
+  #sendPing?: () => void;
+  /** When mIRC last sent anything at all: a reply, an event or a pong. */
+  #heardTs = Date.now();
+  /** When the oldest still-unanswered ping went out. */
+  #pingSentTs?: number;
 
   constructor(options: SessionOptions) {
     this.id = options.id;
@@ -103,6 +124,7 @@ export class Session {
     this.mirc = options.mirc;
     this.dcc = new DccTracker({ stallAfterMs: options.stallAfterMs });
     this.#progressIntervalMs = options.progressIntervalMs ?? PROGRESS_INTERVAL_MS;
+    this.#sendPing = options.ping;
     this.log = new EventLog(options.bufferCapacity);
     this.bus = new EventBus((err, event) => {
       options.log?.error("bus.handler-failed", {
@@ -115,7 +137,38 @@ export class Session {
       maxInFlight: options.maxInFlight,
       defaultTimeoutMs: options.defaultCommandTimeoutMs,
       log: options.log,
+      liveness: options.ping
+        ? { probe: () => this.ping(), explainSilence: (since) => this.explainSilence(since) }
+        : undefined,
     });
+  }
+
+  /** mIRC sent something: it is running scripts. */
+  heard(now = Date.now()): void {
+    this.#heardTs = now;
+    this.#pingSentTs = undefined;
+  }
+
+  /** Ask mIRC for a sign of life. Any frame back counts, not just the pong. */
+  ping(now = Date.now()): void {
+    this.#pingSentTs ??= now;
+    this.#sendPing?.();
+  }
+
+  /**
+   * How long mIRC has failed to answer a ping, once that is long enough to
+   * mean something; undefined while it is answering.
+   */
+  silentForMs(now = Date.now()): number | undefined {
+    if (this.#pingSentTs === undefined) return undefined;
+    const owed = now - this.#pingSentTs;
+    return owed >= SILENT_AFTER_MS ? now - this.#heardTs : undefined;
+  }
+
+  /** For a command sent at `sinceTs` that got no answer: was mIRC there at all? */
+  explainSilence(sinceTs: number, now = Date.now()): string | undefined {
+    if (this.#heardTs >= sinceTs || this.silentForMs(now) === undefined) return undefined;
+    return silenceHint(now - this.#heardTs);
   }
 
   /**

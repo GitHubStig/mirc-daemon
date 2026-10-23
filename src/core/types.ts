@@ -404,4 +404,8 @@ export interface DaemonStatus {
   agentsAttached: number;
   lastStateRefreshTs?: number;
   dccJobs: number;
+  /** Set while mIRC owes a ping answer: how long it has sent nothing. */
+  mircSilentForSecs?: number;
+  /** What that likely means, for the agent to relay. */
+  hint?: string;
 }

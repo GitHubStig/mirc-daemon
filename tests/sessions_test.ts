@@ -52,3 +52,26 @@ Deno.test("progress is polled only while a transfer is open, and the poll stops 
   // Closing clears the timer; Deno's sanitizer fails the test if it leaks.
   s.close("test over");
 });
+
+Deno.test("a ping mIRC leaves unanswered for 5 s makes it silent; anything it sends clears that", () => {
+  let pings = 0;
+  const s = new Session({ id: "s1", nick: "me", write: () => {}, ping: () => pings++ });
+  s.heard(1_000);
+  s.ping(2_000);
+  assertEquals(pings, 1);
+  assertEquals(s.silentForMs(6_000), undefined);
+  assertEquals(s.silentForMs(7_000), 6_000);
+  // A command sent before mIRC went quiet: explained; after it last spoke: not.
+  assertEquals(s.explainSilence(1_500, 7_000)?.includes("sent nothing for 6 s"), true);
+  assertEquals(s.explainSilence(500, 7_000), undefined);
+  s.heard(8_000);
+  assertEquals(s.silentForMs(9_000), undefined);
+});
+
+Deno.test("a second ping before the first is answered does not reset the clock", () => {
+  const s = new Session({ id: "s1", nick: "me", write: () => {}, ping: () => {} });
+  s.heard(0);
+  s.ping(1_000);
+  s.ping(4_000);
+  assertEquals(s.silentForMs(6_000), 6_000);
+});
