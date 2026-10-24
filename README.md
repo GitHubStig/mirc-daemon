@@ -123,3 +123,7 @@ The daemon touches no files but its own log, so it can run on a different machin
 - [docs/live-testing.md](docs/live-testing.md): testing against a live mIRC.
 - [docs/scenarios.md](docs/scenarios.md): plain requests to grade an agent with.
 - [docs/STATE.md](docs/STATE.md): what is left to do.
+
+## License
+
+[MIT](LICENSE).

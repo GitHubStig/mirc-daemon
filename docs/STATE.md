@@ -40,10 +40,6 @@ Seen once in the 2026-10-24 agent runs, and judged not worth a change yet:
 - Scenario 7 on the small models, alone in a fresh session, was judged not worth a separate run.
   Rerun the scenarios after any change to tool descriptions or answers.
 
-## Before making the repo public
-
-- There is no `LICENSE` yet; that is the user's call.
-
 ## The user's mIRC right now
 
 - connected to EFnet as `me` (`cid 1`), in `#home!`, with the script loaded straight from the repo;
