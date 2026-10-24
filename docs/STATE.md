@@ -387,12 +387,14 @@ Proven by running it, with evidence in the log:
   Reads and progress polls are not logged. The notes are best effort: never awaited, never failing
   what they describe.
 
-- **A real agent driving it** (2026-10-23). Plain requests from [docs/scenarios.md](scenarios.md)
-  were given to an agent that had only the MCP tools, with no hints, and graded from
-  `deno task report` (`scripts/session_report.ts`: every tool call, the `@bridge` lines, what was
-  said under the user's nick, and guard refusals, for a time window). Where each model stands, and
-  the rules the runs taught about writing tools, are at the end of scenarios.md; each round's
-  details are in the commit that fixed it.
+- **A real agent driving it** (2026-10-23, done 2026-10-24). Plain requests from
+  [docs/scenarios.md](scenarios.md) were given to an agent that had only the MCP tools, with no
+  hints, and graded from `deno task report` (`scripts/session_report.ts`: every tool call, the
+  `@bridge` lines, what was said under the user's nick, and guard refusals, for a time window).
+  Claude Haiku passes all seven; two small local models in `pi` (Gemma 4 12B and ornith-1.5:9b) pass
+  1 to 6, and 7 on them was judged not worth a separate run. Where each model stands, and the rules
+  the runs taught about writing tools, are at the end of scenarios.md; each round's details are in
+  the commit that fixed it. Rerun the scenarios after any change to tool descriptions or answers.
 
 ## Not verified
 
@@ -569,16 +571,12 @@ minimised **`@bridge`** window, not the active channel. Available while debuggin
 
 ## Next, in order
 
-0. **Every scenario passing under a small local model in `pi`** (direct mode). A weak model shows
-   vague descriptions and unhelpful answers that Haiku gets past. Gemma and ornith-1.5:9b both pass
-   1 to 6 (see "Where each model stands" in scenarios.md). Left: scenario 7 on each, alone in a
-   fresh `pi` session, which also tries `irc_history`'s new-day marker live. Fix in the tool
-   descriptions and answers, never by hinting in the request.
-1. **Close the remaining live gaps when they happen**: a bot's queue, and a real stall. Neither can
-   be found on demand. When the user reports one, read the log for that window: every bot reply, DCC
-   event and 15 s progress poll is in it. A stall can also be staged: the user's mIRC sends itself
-   `/ctcp <own nick> DCC SEND …` pointing at a small local script that sends some bytes and then
-   stops.
+1. **Close the remaining live gaps when they happen**: a bot's queue, a real stall, and a slow
+   search bot's late answer landing during the next search (`fromAnotherSearch`, unit-tested on the
+   order seen live). None can be found on demand. When the user reports one, read the log for that
+   window: every bot reply, DCC event and 15 s progress poll is in it. A stall can also be staged:
+   the user's mIRC sends itself `/ctcp <own nick> DCC SEND …` pointing at a small local script that
+   sends some bytes and then stops.
 2. **Before the first push**: scrub personal details from the history (see the agent's memory and
    ask the user).
 
