@@ -47,6 +47,12 @@ start a second IRC command. A `params` value that would push the frame past the 
 Because a v1 `bridge.mrc` would post base64 into a channel verbatim, the daemon refuses a mismatched
 `hello` and sends `{"t":"bye","reason":…}` first. `bridge.mrc` echoes the reason and stops retrying.
 
+**Version numbers.** Before the first release the protocol went through three development versions:
+v1 with plain params, v2 with base64 params, and v3 with connection ids (ADR-0012). The first
+release renumbered v3 as **v1**, since no script from before it was ever handed out. Where these
+notes, other ADRs, STATE.md or commit messages say v1, v2 or v3 about anything before the
+renumbering, they mean the development versions. A bump after it starts again from 2.
+
 Lists are sent as plain space-separated strings rather than JSON arrays. `ison` takes its nicks as
 one `list`, because mSL found the array by bracket position and nicks such as `[XDCC]Bot` contain
 brackets.

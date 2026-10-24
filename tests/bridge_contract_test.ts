@@ -15,6 +15,7 @@ import { nullLogger } from "../src/core/log.ts";
 import { toWireCommand } from "../src/core/wire.ts";
 import { waitForEvent } from "../src/core/waits.ts";
 import { type RunningMircListener, startMircListener } from "../src/mirc/listener.ts";
+import { PROTOCOL_VERSION } from "../src/core/types.ts";
 import { until } from "./fake_mirc.ts";
 
 const TOKEN = "test-token";
@@ -118,7 +119,7 @@ async function attach(): Promise<Harness> {
   });
 
   const mirc = await RawMirc.connect(listener.addr.hostname, listener.addr.port);
-  mirc.send({ t: "hello", v: 3, token: TOKEN, nick: "me", mirc: "7.75" });
+  mirc.send({ t: "hello", v: 1, token: TOKEN, nick: "me", mirc: "7.75" });
 
   const welcome = await mirc.next();
   assertEquals(welcome?.t, "welcome");
@@ -546,7 +547,14 @@ Deno.test("the diag self-test vector in bridge.mrc is the daemon's real encoding
   assertEquals(vector, (wire.params as Record<string, string>).text);
 });
 
-Deno.test("a v1 bridge.mrc is refused with a reason, not served", async () => {
+Deno.test("bridge.mrc's hello names the protocol version the daemon speaks", async () => {
+  // A version bumped on one side only is refused at every hello, live.
+  const mrc = await Deno.readTextFile(new URL("../mirc/bridge.mrc", import.meta.url));
+  const sent = /\$kvo\(v, (\d+)\)/.exec(mrc)?.[1];
+  assertEquals(Number(sent), PROTOCOL_VERSION);
+});
+
+Deno.test("a bridge.mrc on another protocol version is refused with a reason, not served", async () => {
   const listener = startMircListener({
     hostname: "127.0.0.1",
     port: 0,
@@ -558,7 +566,7 @@ Deno.test("a v1 bridge.mrc is refused with a reason, not served", async () => {
   });
   const mirc = await RawMirc.connect(listener.addr.hostname, listener.addr.port);
   try {
-    mirc.send({ t: "hello", v: 1, token: TOKEN, nick: "me", mirc: "7.75" });
+    mirc.send({ t: "hello", v: 2, token: TOKEN, nick: "me", mirc: "7.75" });
     const bye = await mirc.next();
     assertEquals(bye?.t, "bye");
     assertEquals(String(bye?.reason).includes("bridge.mrc"), true);

@@ -177,8 +177,8 @@ export class LineDecoder {
  * so escaping them everywhere cannot change a valid frame's meaning.
  *
  * bridge.mrc's jstr escapes them itself, so this is defence in depth, not
- * compatibility (a pre-v2 script is refused at hello, before it can send an
- * event). It stays because a regression in jstr would fail the worst possible
+ * compatibility (a script on another protocol version is refused at hello,
+ * before it can send an event). It stays because a regression in jstr would fail the worst possible
  * way: every coloured line dropped, with nothing to say why.
  */
 export function escapeControlChars(line: string): string {

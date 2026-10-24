@@ -5,15 +5,16 @@
  */
 
 /**
- * Wire protocol version. Bumped only on a breaking frame-shape change.
+ * Wire protocol version, sent in mIRC's hello. Bumped only on a breaking
+ * frame-shape change, and a mismatched hello is refused rather than tolerated:
+ * a script on another version could post base64 params into a channel
+ * verbatim, or run commands on whichever window happens to be active.
  *
- * 2: string command params are base64. A v1 bridge.mrc would post the encoded
- *    text verbatim, so a mismatched hello is refused rather than tolerated.
- * 3: multi-connection. Events carry `cid`, commands name the connection they
- *    act on, and `state` is replaced by `conns` + `chans`. A v2 script would
- *    run every command on whichever window happened to be active.
+ * 1: string command params are base64, events carry `cid`, and commands name
+ *    the connection they act on. Development went through three versions
+ *    before the first release, which restarted the count (see ADR-0002).
  */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 1;
 
 /** mIRC's line limit is just under 4150 bytes; leave headroom. */
 export const MAX_FRAME_BYTES = 3500;

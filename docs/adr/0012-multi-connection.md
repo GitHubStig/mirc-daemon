@@ -54,8 +54,8 @@ Two live connections to one network are refused with both cids in the hint, neve
 on, and only that connection's reply (366, a refusal numeric, PART, 303) can answer it. The same
 channel name or nick on another network cannot complete it.
 
-This is protocol **v3**. A v2 script would run every command on the active window, so the daemon
-refuses it at `hello`.
+This was development protocol **v3**, released as v1 (see ADR-0002). A v2 script would run every
+command on the active window, so the daemon refuses it at `hello`.
 
 ## Phase 2: ownership, disconnect and nick
 

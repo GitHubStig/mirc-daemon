@@ -5,7 +5,8 @@ decision see `docs/adr/`. This file is about what is true **right now**.
 
 ## Short version
 
-_Last updated 2026-10-24. Protocol **v3**._
+_Last updated 2026-10-24. Protocol **v1**: renumbered before the first release, so "v2" and "v3"
+below are development versions (see ADR-0002)._
 
 Everything an agent needs works against a real mIRC 7.85:
 

@@ -147,8 +147,9 @@ export async function handleMircConnection(
       return;
     }
     if (frame.v !== PROTOCOL_VERSION) {
-      // Refused, not tolerated: a v1 bridge.mrc reads base64 params as plain
-      // text, so it would post the encoded string into a channel verbatim.
+      // Refused, not tolerated: a bridge.mrc on another version may read
+      // base64 params as plain text, and post the encoded string into a
+      // channel verbatim, or act on the wrong connection.
       connectionLog.warn("mirc.protocol-mismatch", {
         theirs: frame.v,
         ours: PROTOCOL_VERSION,

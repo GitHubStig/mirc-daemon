@@ -138,7 +138,7 @@ alias -l jval {
   if ($regex($1, %pat)) return $regml(1)
 }
 
-; A command param: base64 on the wire (since protocol v2), decoded here.
+; A command param: base64 on the wire (ADR-0002), decoded here.
 ; Decoded through a binary variable so the bytes are read back as UTF-8 text
 ; rather than one character per byte. The daemon has already turned line
 ; breaks into spaces, so the result is always safe to hand to /msg.
@@ -241,7 +241,7 @@ alias bridge.test {
 ; Built in one place so the diagnostic can show exactly what would be sent.
 ; $1 = token, so the diagnostic can pass a mask instead.
 alias -l bridge_helloframe {
-  return $chr(123) $+ $kvo(t, $jstr(hello)) $+ $chr(44) $+ $kvo(v, 3) $+ $chr(44) $+ $kvo(token, $jstr($1)) $+ $chr(44) $+ $kvo(nick, $jstr($me)) $+ $chr(44) $+ $kvo(mirc, $jstr($version)) $+ $chr(125)
+  return $chr(123) $+ $kvo(t, $jstr(hello)) $+ $chr(44) $+ $kvo(v, 1) $+ $chr(44) $+ $kvo(token, $jstr($1)) $+ $chr(44) $+ $kvo(nick, $jstr($me)) $+ $chr(44) $+ $kvo(mirc, $jstr($version)) $+ $chr(125)
 }
 
 ; Not -l: it is run from a timer, and whether a timer may call a local alias is
