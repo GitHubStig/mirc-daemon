@@ -35,6 +35,7 @@ import {
   silenceHint,
 } from "../core/sessions.ts";
 import { classifyNumeric, emptyChannelWarning } from "../core/outcomes.ts";
+import { markDays } from "../core/history.ts";
 import { isChannelBuffer, waitForEvent, type WaitMatcher } from "../core/waits.ts";
 import {
   channelsIn,
@@ -984,11 +985,20 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         // Seen with a real agent: it asked for 200, got about 40, and told the
         // user it had read "the last 200 lines".
         const capped = got.length < asked && from !== undefined && from > 1;
+        const marked = markDays(got.map((l) => plainText(l)));
         return json({
           window,
           network: net.name,
           returned: got.length,
-          lines: got.map((l) => plainText(l)),
+          lines: marked.lines,
+          ...(marked.days > 0
+            ? {
+              days: 'mIRC\'s timestamps carry no date. Each "--- new day" line marks where the ' +
+                "clock goes back, so the lines above it are from an earlier day than the lines " +
+                "below; say so rather than treating them as one day. A day where the clock still " +
+                "moved forward is not marked, so there may be more.",
+            }
+            : {}),
           ...(from !== undefined ? { from } : {}),
           total: outcome.data?.total ?? null,
           ...(capped

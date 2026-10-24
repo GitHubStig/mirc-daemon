@@ -938,10 +938,35 @@ Deno.test("irc_history returns mIRC's lines, offers the page before, and names m
     assertEquals(body.capped.includes("Only 2 of the 50"), true);
     assertEquals(body.capped.includes("before: 71"), true);
     assertEquals(s.fake.received.find((c) => c.action === "history")?.params?.before, 0);
+    // One day only: no marker, and no note about days.
+    assertEquals(body.days, undefined);
 
     const gone = await s.client.callTool({ name: "irc_history", arguments: { window: "#gone" } });
     assertEquals(textOf(gone).startsWith("not_on_channel:"), true);
     assertEquals(textOf(gone).includes("#chan"), true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("irc_history marks where the scrollback crosses into a later day", async () => {
+  const s = await stack();
+  try {
+    s.fake.setHandler((cmd) =>
+      cmd.action === "history"
+        ? {
+          ok: true,
+          data: { total: 3, from: 1, lines: ["[22:09] <a> late", "[11:26] <b> morning"] },
+        }
+        : undefined
+    );
+    const body = JSON.parse(textOf(
+      await s.client.callTool({ name: "irc_history", arguments: { window: "#chan", lines: 2 } }),
+    ));
+    assertEquals(body.returned, 2);
+    assertEquals(body.lines.length, 3);
+    assertEquals(body.lines[1].startsWith("--- new day"), true);
+    assertEquals(body.days.includes("no date"), true);
   } finally {
     await s.stop();
   }
