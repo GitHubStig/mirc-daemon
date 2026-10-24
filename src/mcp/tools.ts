@@ -1513,7 +1513,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
   /**
    * Close the agent's disconnected windows, after a disconnect. mIRC's
    * `/close -it` closes every disconnected window at once, with what is open
-   * inside it, and nothing closes just one (STATE.md), so this only acts when
+   * inside it, and nothing closes just one (docs/findings.md), so this only acts when
    * every one of them is the agent's and none holds a running transfer.
    * Otherwise it leaves them all and says why. There was once a tool that
    * closed the user's too, with confirm; agents stumbled over the extra step,

@@ -21,6 +21,28 @@ There is **no LLM or provider code in this repo.** The daemon is a control surfa
 - **Never pass a secret on the command line.** The permission collector records approved commands
   verbatim into `.commandcode/settings.json`, so a token in an argument gets written to a file.
   Secrets belong in gitignored files (`mirc/bridge.ini`, `.env`) or in the environment.
+- **Keep personal details out of commits.** The history was scrubbed once. Live logs and agent
+  sessions show the user's real nick, channel and paths, and other people's nicks; in docs, tests
+  and commit messages write `me`, `#home`, `D:\Downloads`, `<repo>`, and neutral names (`Friend`,
+  `#FILES`, `[XB]Bot`) instead. Push only when the user says so.
+
+## Working with the user's mIRC
+
+Live tests run against the user's own mIRC and IRC connections (see `docs/live-testing.md`).
+
+- **Warn before every `bridge.mrc` save, and batch mSL edits into one save.** mIRC loads the script
+  straight from the repo and pops a reload prompt on every write. Make mSL changes with a small
+  patch script that writes the file once, not with several edits.
+- **The user's things are theirs.** The agent may use the user's connections and channels. It
+  leaves, disconnects or renames only when asked, and with `confirm: true` on anything it did not
+  open itself.
+- **At most one agent connection per network the user is on.** More connections from one host risk a
+  ban, EFnet above all. When a test needs a second client there, ask to use the user's own.
+- **Nothing sent to IRC may mark the traffic as automated.** No agent nick, and mIRC's own default
+  quit message unless the user gives one.
+- **Request a pack straight away, then tell the user what is coming.** Users go straight to
+  `xdcc send`, never `xdcc info`. As soon as the offer names the file and size, say so, and cancel
+  with `xdcc_cancel` if it is not what was wanted.
 
 ## Non-negotiable design constraints
 
@@ -54,8 +76,15 @@ reworking it.
 - **Do not edit `.commandcode/`.** It is machine-managed (taste, permissions) and is excluded from
   `deno fmt` for exactly that reason.
 
-## Where decisions live
+## Where things live
 
-Design decisions are numbered ADRs under `docs/adr/` (see `docs/adr/README.md`), and the raw
-reasoning is kept verbatim under `docs/discussion/`. If a change contradicts an ADR, update the ADR
-in the same change rather than letting the two drift apart.
+- `README.md`: what it is, installing, connecting an agent, the tools. For users.
+- `docs/STATE.md`: **only what is left to do**, and how the user's mIRC is set up for testing. Read
+  it first in a new session. When something is done, take it out; what it proved goes to
+  findings.md. No test counts, coverage lists or tool tallies.
+- `docs/findings.md`: what running it live proved, what is still assumed, and the silent traps. Add
+  to it whenever a live run teaches something, especially a trap the test double could not show.
+- `docs/live-testing.md`: setting up, driving and reading a live run.
+- `docs/scenarios.md`: plain requests to grade an agent with, and where each model stands.
+- `docs/adr/`: numbered design decisions (see `docs/adr/README.md`). If a change contradicts an ADR,
+  update the ADR in the same change rather than letting the two drift apart.

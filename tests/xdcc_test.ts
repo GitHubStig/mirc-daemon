@@ -64,8 +64,7 @@ Deno.test("a search reply is matched to the query it quotes, the longest first",
 
 Deno.test("search triggers are read from a topic, and the searching one is picked", () => {
   // #FILES-CHAT's topic, as the join returned it, colour codes and all.
-  const topic =
-    "\x031 \x0311,1\x02:: \x0314,1FiLES \x0311::\x02 \x030Search: \x02\x0311ONLINE" +
+  const topic = "\x031 \x0311,1\x02:: \x0314,1FiLES \x0311::\x02 \x030Search: \x02\x0311ONLINE" +
     "\x02\x031|\x030Triggers: \x0315\x02!help\x02 !search !latest !recommended !hot \x0311 join " +
     "#helpers if you want to help serve files \x0f";
   const triggers = triggersIn(topic);
