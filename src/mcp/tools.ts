@@ -28,7 +28,12 @@ import {
   sameNetwork,
   TRANSFER_DCC_STATES,
 } from "../core/types.ts";
-import { type Session, type SessionRegistry, silenceHint } from "../core/sessions.ts";
+import {
+  type SearchSaid,
+  type Session,
+  type SessionRegistry,
+  silenceHint,
+} from "../core/sessions.ts";
 import { classifyNumeric, emptyChannelWarning } from "../core/outcomes.ts";
 import { isChannelBuffer, waitForEvent, type WaitMatcher } from "../core/waits.ts";
 import {
@@ -36,6 +41,7 @@ import {
   classifyBotReply,
   parseSearchResult,
   plainText,
+  quotedQuery,
   searchTotal,
   searchTrigger,
   triggersIn,
@@ -177,9 +183,11 @@ async function targetOf(
   network: string | undefined,
   thresholdMs: number,
   cid?: number,
+  /** The channel the call is about, if any: only for a refusal's hint. */
+  channel?: string,
 ): Promise<NetworkState> {
   await freshen(session, thresholdMs);
-  if (cid === undefined) return session.state.resolve(network);
+  if (cid === undefined) return session.state.resolve(network, channel);
   // An explicit connection id wins: it is how two connections to one network
   // (say the user's and the agent's, both on EFnet) are told apart.
   const net = session.state.byCid(cid);
@@ -448,7 +456,13 @@ const sessionArg = z
 const networkArg = z
   .string()
   .optional()
-  .describe("Network name; omit when only one is connected.");
+  // Was "omit when only one is connected". Seen with a small local model: it
+  // took that as "usually omit", lost count of its connections, and left it out
+  // of four calls with three networks up.
+  .describe(
+    'The network, e.g. "Rizon". Always pass the one the user named, or the one the ' +
+      "channel is on. Leave it out only when mIRC is on a single network.",
+  );
 const cidArg = z
   .int()
   .optional()
@@ -700,6 +714,10 @@ const xdccSearchResultsSchema = z.object({
   cid: cidArg,
   channel: z.string().describe("The channel the search was said in."),
   cursor: z.int().nonnegative().describe("The cursor xdcc_search returned."),
+  query: z
+    .string()
+    .optional()
+    .describe("The words that search was for, as xdcc_search's answer gives them."),
   timeoutMs: z.int().min(500).max(MAX_WAIT_MS).optional(),
   quietMs: z.int().min(100).max(30_000).optional(),
 });
@@ -721,9 +739,10 @@ const xdccFetchSchema = z.object({
     .boolean()
     .optional()
     .describe(
-      "The channel's topic names other channels, and having read it you judged that joining " +
-        "them is NOT required. Never set this to skip a requirement: joining is cheap, a ban " +
-        "is not.",
+      "Leave this out unless xdcc_fetch answered join_required for this channel. Then, having " +
+        "read the topic it quoted, you judged that joining the channels it names is NOT " +
+        "required. Ignored before that. Never set this to skip a requirement: joining is " +
+        "cheap, a ban is not.",
     ),
 });
 const rawSchema = z.object({
@@ -932,7 +951,13 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     ({ session, network, cid, window, lines, before }: HistoryArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        const net = await targetOf(s, network, stateFreshnessMs, cid);
+        const net = await targetOf(
+          s,
+          network,
+          stateFreshnessMs,
+          cid,
+          isChannelBuffer(window) ? window : undefined,
+        );
         const outcome = await s.commands.send("history", {
           cid: net.cid,
           window,
@@ -988,7 +1013,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     ({ session, network, cid, channel }: MembersArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        const net = await targetOf(s, network, stateFreshnessMs, cid);
+        const net = await targetOf(s, network, stateFreshnessMs, cid, channel);
         const outcome = await s.commands.send("members", { cid: net.cid, channel });
         if (!outcome.ok) return failure(outcome.error);
         const names = Array.isArray(outcome.data?.names) ? (outcome.data!.names as string[]) : [];
@@ -1235,7 +1260,9 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     "irc_join",
     {
       description:
-        "Make sure mIRC is in a channel, joining only if it is not already there. Returns the " +
+        "Make sure mIRC is in a channel, joining only if it is not already there. Joining a " +
+        "name nobody is in creates that channel, and on most networks makes you its operator, " +
+        "so this is also how to make a new channel. Returns the " +
         "channel's topic: read it, since channels state their rules there. Not needed before " +
         "xdcc_fetch or xdcc_search, which join by themselves. A channel with almost nobody " +
         "in it comes back with a warning, since that often means the name is wrong.",
@@ -1244,7 +1271,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     ({ session, network, cid, channel, key }: JoinArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        const net = await targetOf(s, network, stateFreshnessMs, cid);
+        const net = await targetOf(s, network, stateFreshnessMs, cid, channel);
         // Asked of mIRC even when already joined: it answers that from its own
         // records at once, with the topic, and sends nothing to the server.
         const outcome = await s.commands.send("join", { cid: net.cid, channel, key }, {
@@ -1332,7 +1359,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     ({ session, network, cid, channel, modes, confirm }: ModeArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        const net = await targetOf(s, network, stateFreshnessMs, cid);
+        const net = await targetOf(s, network, stateFreshnessMs, cid, channel);
         if (!s.owned.ownsChannel(net.cid, channel) && confirm !== true) {
           return usersOwn(channel, net);
         }
@@ -1413,7 +1440,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     ({ session, network, cid, channel, text, confirm }: TopicArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        const net = await targetOf(s, network, stateFreshnessMs, cid);
+        const net = await targetOf(s, network, stateFreshnessMs, cid, channel);
         if (text === undefined) {
           const read = await s.commands.send("topic", { cid: net.cid, channel });
           if (!read.ok) return failure(read.error);
@@ -1463,7 +1490,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     ({ session, network, cid, channel, message, confirm }: PartArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        const net = await targetOf(s, network, stateFreshnessMs, cid);
+        const net = await targetOf(s, network, stateFreshnessMs, cid, channel);
         if (!s.owned.ownsChannel(net.cid, channel) && confirm !== true) {
           return usersOwn(channel, net);
         }
@@ -1697,7 +1724,13 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
     ({ session, network, cid, target, text, notice }: SendArgs) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        const net = await targetOf(s, network, stateFreshnessMs, cid);
+        const net = await targetOf(
+          s,
+          network,
+          stateFreshnessMs,
+          cid,
+          isChannelBuffer(target) ? target : undefined,
+        );
         if (isChannelBuffer(target)) {
           // Refused before sending, not warned about after: seen with two
           // models, a hand-typed search was never followed up, and a warning
@@ -2008,19 +2041,58 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
   );
 
   /**
+   * The search said in `channel` that `cursor` belongs to: the last one said at
+   * or before it, and for `query` when given. Two searches said with no event
+   * between them share a cursor, and only the query tells them apart.
+   */
+  function searchAt(
+    s: Session,
+    cid: number,
+    channel: string,
+    cursor: number,
+    query?: string,
+  ): SearchSaid | undefined {
+    return s.searches.findLast((x) =>
+      x.cid === cid && x.channel.toLowerCase() === channel.toLowerCase() && x.cursor <= cursor &&
+      (query === undefined || x.query.toLowerCase() === query.toLowerCase())
+    ) ?? (query === undefined ? undefined : searchAt(s, cid, channel, cursor));
+  }
+
+  /**
    * Collect a search's replies, from `cursor` on: wait up to `waitMs` for the
    * first, then until nothing has come for `quietMs`. Replies that arrived
    * before the call are in the log already and are picked up first, which is
    * how xdcc_search_results finds results that came in between calls.
+   *
+   * Replies to another search said in the channel are set aside as
+   * `elsewhere`: they neither count as this search's answer nor end the wait.
+   * Seen live (Rizon, 2026-10-24): a slow search's answer, "Search for
+   * NoSuchBot" then "No results were found.", landed while the next search
+   * was collecting, and was reported as that search finding nothing. A line
+   * that quotes a query goes with that search, and a bot's other lines go with
+   * the last one it quoted, since a bot sends one search's answer as a block.
+   * Until a bot has quoted one, its lines are this search's. With `query`
+   * unknown (a daemon restart forgot the searches), nothing is set aside.
    */
   async function collectSearch(
     s: Session,
     cid: number,
     channel: string,
+    query: string | undefined,
     cursor: number,
     waitMs: number,
     quietMs: number,
-  ): Promise<{ replies: BridgeEvent[]; complete: boolean } | undefined> {
+  ): Promise<{ replies: BridgeEvent[]; elsewhere: BridgeEvent[]; complete: boolean } | undefined> {
+    const others = query === undefined ? [] : [
+      ...new Set(
+        s.searches
+          .filter((x) =>
+            x.cid === cid && x.channel.toLowerCase() === channel.toLowerCase() &&
+            x.query.toLowerCase() !== query.toLowerCase()
+          )
+          .map((x) => x.query),
+      ),
+    ];
     // Search bots answer by private notice (seen live); a few answer in the
     // channel, so a channel line counts only when it is a result.
     const matcher: WaitMatcher = {
@@ -2033,10 +2105,14 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
             parseSearchResult(e.text ?? "") !== undefined)),
     };
     const deadline = Date.now() + waitMs;
+    const queries = query === undefined ? [] : [query, ...others];
+    /** Per bot: whether the last query it quoted was another search's. */
+    const answeringAnother = new Map<string, boolean>();
     const replies: BridgeEvent[] = [];
+    const elsewhere: BridgeEvent[] = [];
     let since = cursor;
     let complete = true;
-    while (replies.length < 300) {
+    while (replies.length + elsewhere.length < 300) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
         if (replies.length > 0) complete = false;
@@ -2052,10 +2128,20 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
       });
       if (!next && s.closed.aborted) return undefined;
       if (!next) break;
-      replies.push(next);
       since = next.seq;
+      const bot = (next.nick ?? "").toLowerCase();
+      // Only headers and hints decide: a result's file name can contain any
+      // word ("Linux.Mint" in a search for "mint" beside one for "linux").
+      const quoted = parseSearchResult(next.text ?? "") === undefined
+        ? quotedQuery(next.text ?? "", queries)
+        : undefined;
+      if (quoted !== undefined) {
+        answeringAnother.set(bot, quoted.toLowerCase() !== query?.toLowerCase());
+      }
+      if (answeringAnother.get(bot) === true) elsewhere.push(next);
+      else replies.push(next);
     }
-    return { replies, complete };
+    return { replies, elsewhere, complete };
   }
 
   // A bot tool joins the channel it is told to, and the join can land in the
@@ -2165,11 +2251,17 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
   /** What a search turned up, for the agent: results, the total, and every other line. */
   function searchReport(
     channel: string,
+    query: string | undefined,
     cursor: number,
-    collected: { replies: BridgeEvent[]; complete: boolean },
+    collected: { replies: BridgeEvent[]; elsewhere: BridgeEvent[]; complete: boolean },
     about: Record<string, unknown> = {},
   ): ToolResult {
-    const { replies, complete } = collected;
+    const { replies, elsewhere, complete } = collected;
+    const other = elsewhere.length === 0 ? {} : {
+      fromAnotherSearch: elsewhere.slice(0, 20).map((e) => e.nick + ": " + plainText(e.text ?? "")),
+      aboutThat: "fromAnotherSearch answers a different search said in this channel, not this " +
+        "one. If that search still matters to the user, tell them what it says.",
+    };
     if (replies.length === 0) {
       return json({
         ...about,
@@ -2177,11 +2269,13 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         pending: true,
         cursor,
         results: [],
+        ...other,
         // Seen with a small local model: told to call back "in a minute or so",
         // it ended its turn promising to check, and never did. The bot answered
         // 4.6 minutes after the search, into a cursor nobody collected.
         next: "No answer yet; search bots queue searches, and one took almost 5 minutes. Call " +
           "xdcc_search_results {cursor: " + cursor + ", channel: " + JSON.stringify(channel) +
+          (query === undefined ? "" : ", query: " + JSON.stringify(query)) +
           "} now: it waits up to ~50 s by itself. Each time it comes back pending, call it " +
           "again with the same cursor, for up to about 8 minutes, before telling the user " +
           "nothing came back. Do not end your turn to check later: nothing is collected until " +
@@ -2205,9 +2299,10 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
       shown: results.length,
       ...(total !== undefined ? { total } : {}),
       said,
+      ...other,
       complete,
       // From here on: replies from a later search, or the rest of this one.
-      cursor: replies[replies.length - 1].seq,
+      cursor: Math.max(replies[replies.length - 1].seq, ...elsewhere.map((e) => e.seq)),
       next: results.length > 0
         ? "Pick the result that matches what the user wants (check the name and size), tell " +
           "the user which it is, then xdcc_fetch {bot, pack} in the channel where that bot is, " +
@@ -2240,7 +2335,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
       guarded(async () => {
         const started = Date.now();
         const s = sessionOf(registry, session);
-        const net = await targetOf(s, network, stateFreshnessMs, cid);
+        const net = await targetOf(s, network, stateFreshnessMs, cid, channel);
         // Joined or not, the reply carries the topic, which lists the triggers.
         const joined = await s.commands.send("join", { cid: net.cid, channel }, {
           context: "join",
@@ -2301,18 +2396,21 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         );
         if (!sent.ok) return failure(sent.error);
         s.note("searched in " + channel + ": " + said);
+        s.searches.push({ cid: net.cid, channel, query, cursor });
+        if (s.searches.length > 50) s.searches.shift();
 
         // The pause and any rename wait come out of the call's own budget.
         const collected = await collectSearch(
           s,
           net.cid,
           channel,
+          query,
           cursor,
           Math.max(1000, (timeoutMs ?? 50_000) - (Date.now() - started)),
           quietMs ?? 3000,
         );
         if (!collected) return linkDropped();
-        return searchReport(channel, cursor, collected, {
+        return searchReport(channel, query, cursor, collected, {
           query,
           trigger: command,
           ...(renamed ? { renamed: renameNote(renamed) } : {}),
@@ -2330,20 +2428,24 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         "Replies are kept, so nothing is lost by a late call.",
       inputSchema: xdccSearchResultsSchema.shape,
     },
-    ({ session, network, cid, channel, cursor, timeoutMs, quietMs }: XdccSearchResultsArgs) =>
+    (
+      { session, network, cid, channel, cursor, query, timeoutMs, quietMs }: XdccSearchResultsArgs,
+    ) =>
       guarded(async () => {
         const s = sessionOf(registry, session);
-        const net = await targetOf(s, network, stateFreshnessMs, cid);
+        const net = await targetOf(s, network, stateFreshnessMs, cid, channel);
+        const searched = searchAt(s, net.cid, channel, cursor, query)?.query;
         const collected = await collectSearch(
           s,
           net.cid,
           channel,
+          searched,
           cursor,
           timeoutMs ?? 50_000,
           quietMs ?? 3000,
         );
         if (!collected) return linkDropped();
-        return searchReport(channel, cursor, collected);
+        return searchReport(channel, searched, cursor, collected);
       }),
   );
 
@@ -2378,7 +2480,7 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         };
 
         // 1. connected?
-        const net = await targetOf(s, network, stateFreshnessMs);
+        const net = await targetOf(s, network, stateFreshnessMs, undefined, channel);
         if (net.status !== "connected") {
           return await fail(
             bridgeError(
@@ -2439,7 +2541,13 @@ export function registerTools(server: McpServer, options: ToolOptions): void {
         const missing = channelsIn(topic).filter((c) =>
           c.toLowerCase() !== channel.toLowerCase() && !s.state.isJoined(net, c)
         );
-        if (missing.length > 0 && topicRead !== true) {
+        // topicRead counts only once this tool has shown the agent the topic.
+        // Seen with a small local model: it set every optional flag on its first
+        // call, topicRead: true included, and skipped a channel it was never
+        // told about.
+        const topicKey = `${net.cid} ${channel.toLowerCase()}`;
+        if (missing.length > 0 && (topicRead !== true || !s.topicsShown.has(topicKey))) {
+          s.topicsShown.add(topicKey);
           return failure(
             bridgeError(
               "join_required",

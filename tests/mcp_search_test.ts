@@ -218,6 +218,77 @@ Deno.test("a slow search bot: xdcc_search hands back a cursor, xdcc_search_resul
   }
 });
 
+Deno.test("a late answer to an earlier search is not taken for the next one's", async () => {
+  // Live (Rizon, 2026-10-24), in this order: the answer to "NoSuchBot" came
+  // while "linux" was collecting, then linux's, then a NoSuchBot hint.
+  const s = await stack();
+  try {
+    const say = (text: string) => s.fake.emit("notice", { buf: "Finder", nick: "Finder", text });
+    s.fake.setHandler((cmd) => {
+      if (cmd.action === "join") {
+        return { ok: true, data: { joined: "#chat", members: 600, topic: "Triggers: !search" } };
+      }
+      if (cmd.action === "msg" && cmd.params?.text === "!search linux") {
+        setTimeout(() => {
+          say("\x0314,1 FiLES\x030 Search for\x0311 NoSuchBot \x0f");
+          say("\x030,1   No results were found. \x0f");
+        }, 20);
+        setTimeout(() => {
+          say("FiLES Search for linux");
+          say("Shattered.Pixel.Dungeon.Linux ( Command: /msg Bot XDCC SEND #2413 ) Size: 429M");
+          say("1184 results found out of 831827");
+          say("You can try reqesting the file !request <category> NoSuchBot");
+        }, 300);
+      }
+      return undefined;
+    });
+    const first = JSON.parse(textOf(
+      await s.client.callTool({
+        name: "xdcc_search",
+        arguments: { channel: "#chat", query: "NoSuchBot", timeoutMs: 500, quietMs: 100 },
+      }),
+    ));
+    assertEquals(first.pending, true);
+
+    const body = JSON.parse(textOf(
+      await s.client.callTool({
+        name: "xdcc_search",
+        arguments: { channel: "#chat", query: "linux", quietMs: 500 },
+      }),
+    ));
+    assertEquals(body.results.map((r: { pack: string }) => r.pack), ["2413"]);
+    assertEquals(body.total, 1184);
+    assertEquals(body.said, [
+      "Finder: FiLES Search for linux",
+      "Finder: 1184 results found out of 831827",
+    ]);
+    assertEquals(body.fromAnotherSearch.length, 3);
+    assertEquals(body.fromAnotherSearch[1], "Finder: No results were found.");
+
+    // Collecting the first search now finds its own answer, and not linux's.
+    // Nothing arrived between the two searches, so they share a cursor, and the
+    // query the hint names is what tells them apart.
+    assertEquals(first.next.includes('query: "NoSuchBot"'), true);
+    const late = JSON.parse(textOf(
+      await s.client.callTool({
+        name: "xdcc_search_results",
+        arguments: {
+          channel: "#chat",
+          cursor: first.cursor,
+          query: "NoSuchBot",
+          timeoutMs: 500,
+          quietMs: 100,
+        },
+      }),
+    ));
+    assertEquals(late.said.includes("Finder: No results were found."), true);
+    assertEquals(late.results, []);
+    assertEquals(late.fromAnotherSearch.length, 3);
+  } finally {
+    await s.stop();
+  }
+});
+
 Deno.test("xdcc_search says so when the topic does not show how to search", async () => {
   const s = await stack();
   try {

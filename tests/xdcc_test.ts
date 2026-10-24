@@ -6,6 +6,7 @@ import {
   parseDccOffer,
   parseSearchResult,
   plainText,
+  quotedQuery,
   searchTotal,
   searchTrigger,
   triggersIn,
@@ -51,6 +52,14 @@ Deno.test("lines that are not results are not taken for one, and the total is re
     searchTotal("\x030,1 445 \x0315results found out of 829094 \x0312- \x0315Add more keywords"),
     445,
   );
+});
+
+Deno.test("a search reply is matched to the query it quotes, the longest first", () => {
+  // As [XB]-L0VE sent it, colour codes and all.
+  const header = "\x0314,1 FiL\x030E\x0314S\x030 Search for\x0311 NoSuchBot \x0f";
+  assertEquals(quotedQuery(header, ["linux", "NoSuchBot"]), "NoSuchBot");
+  assertEquals(quotedQuery("Search for Linux Mint", ["linux", "linux mint"]), "linux mint");
+  assertEquals(quotedQuery("No results were found.", ["linux", "NoSuchBot"]), undefined);
 });
 
 Deno.test("search triggers are read from a topic, and the searching one is picked", () => {

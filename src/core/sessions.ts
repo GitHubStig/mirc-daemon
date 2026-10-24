@@ -28,6 +28,14 @@ import {
   type SessionInfo,
 } from "./types.ts";
 
+/** A search xdcc_search said, and where the log stood just before it. */
+export interface SearchSaid {
+  cid: number;
+  channel: string;
+  query: string;
+  cursor: number;
+}
+
 /** mIRC's $status has a fourth value, "loggingon", which is still connecting. */
 function toStatus(status: string): NetworkStatus {
   if (status === "connected" || status === "disconnected") return status;
@@ -104,6 +112,18 @@ export class Session {
   readonly dcc: DccTracker;
   /** What the agent opened or joined itself; see ownership.ts. */
   readonly owned = new OwnershipLedger();
+  /**
+   * Searches said so far, oldest first. Search bots answer minutes late, so one
+   * search's answer can arrive while the next is being collected; the queries
+   * are how the two are told apart.
+   */
+  readonly searches: SearchSaid[] = [];
+  /**
+   * Channels (`cid channel`, lower-cased) whose topic xdcc_fetch has quoted in
+   * a join_required. Only then can the agent have read it, so only then does
+   * its topicRead count.
+   */
+  readonly topicsShown = new Set<string>();
   readonly commands: CommandDispatcher;
   nick: string;
   mirc?: string;

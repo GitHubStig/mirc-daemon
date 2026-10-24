@@ -186,6 +186,20 @@ export function searchTotal(text: string): number | undefined {
   return m ? Number(m[1].replace(/,/g, "")) : undefined;
 }
 
+/**
+ * Which of `queries` a search reply quotes, if any. Search bots echo the query
+ * in their header ("Search for linux") and their hints ("!request <category>
+ * linux"), in any language, which is how a late answer to one search is told
+ * from the answer to the next. The longest query quoted wins, so a reply about
+ * "linux mint" is not taken for one about "linux". Case is ignored.
+ */
+export function quotedQuery(text: string, queries: string[]): string | undefined {
+  const line = plainText(text).toLowerCase();
+  const quoted = queries.filter((q) => q.trim() !== "" && line.includes(q.toLowerCase()));
+  if (quoted.length === 0) return undefined;
+  return quoted.reduce((a, b) => (b.length > a.length ? b : a));
+}
+
 export interface DccOffer {
   file: string;
   /** Bytes, when the offer says (it normally does). */

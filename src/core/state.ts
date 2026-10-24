@@ -152,8 +152,13 @@ export class StateModel {
    *
    * With no name, only connected connections count, so a leftover disconnected
    * status window does not make every call ambiguous.
+   *
+   * `channel`, when the call names one, only improves the refusal: it says
+   * where that channel is joined, so the agent can pass the right network on
+   * the next call. It never picks for the agent (ADR-0005): a tool that joins
+   * by itself may mean a same-named channel on another network.
    */
-  resolve(name?: string): NetworkState {
+  resolve(name?: string, channel?: string): NetworkState {
     if (name !== undefined) {
       const matches = this.networks().filter((n) => sameNetwork(n.name, name));
       if (matches.length === 1) return matches[0];
@@ -192,8 +197,9 @@ export class StateModel {
     throw new BridgeFailure(
       bridgeError(
         "ambiguous_network",
-        `${connected.length} networks are connected (${describe(connected)}); ` +
-          "name one explicitly.",
+        `${connected.length} networks are connected (${describe(connected)}), and nothing was ` +
+          "sent. " + (channel === undefined ? "" : whereJoined(connected, channel)) +
+          "Call again with network set to the one the user named.",
       ),
     );
   }
@@ -225,6 +231,25 @@ export class StateModel {
 }
 
 /** "EFnet (cid 1, connected), Rizon (cid 3, connecting)" — for hints. */
+/**
+ * Where `channel` is joined among `connected`, said as the call to make. Seen
+ * with a small local model: told only "name one explicitly", it fixed each call
+ * by luck, and the daemon knew the answer all along.
+ */
+function whereJoined(connected: readonly NetworkState[], channel: string): string {
+  const inIt = connected.filter((n) =>
+    n.channels.some((c) => c.toLowerCase() === channel.toLowerCase())
+  );
+  if (inIt.length === 0) return `mIRC is not in ${channel} on any of them. `;
+  if (inIt.length > 1) {
+    return `${channel} is joined on ${describe(inIt)}: pass cid to pick one, or ask the user. `;
+  }
+  const net = inIt[0];
+  const shared = connected.filter((n) => sameNetwork(n.name, net.name)).length > 1;
+  return `${channel} is joined only on ${net.name} (cid ${net.cid}): if that is the one the ` +
+    `user means, pass ${shared ? `cid: ${net.cid}` : `network: "${net.name}"`}. `;
+}
+
 function describe(networks: readonly NetworkState[]): string {
   return networks.map((n) => `${n.name} (cid ${n.cid}, ${n.status})`).join(", ");
 }

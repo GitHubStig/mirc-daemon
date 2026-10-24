@@ -32,6 +32,42 @@ Deno.test("resolve refuses to guess when several networks are connected", () => 
   assertEquals(state.resolve("net2").name, "net2");
 });
 
+Deno.test("the refusal says where the channel is joined, and still picks nothing", () => {
+  // Live: three networks up and a channel joined on one; the hint only said
+  // "name one explicitly", four times over.
+  const state = new StateModel();
+  state.applyStateFrame([
+    network({ cid: 1, name: "EFNet", channels: ["#home!"] }),
+    network({ cid: 16881, name: "Rizon", channels: ["#files-chat"] }),
+  ]);
+  const err = assertThrows(
+    () => state.resolve(undefined, "#FILES-CHAT"),
+    BridgeFailure,
+  ) as BridgeFailure;
+  assertEquals(err.error.code, "ambiguous_network");
+  assertEquals(err.error.hint.includes("joined only on Rizon (cid 16881)"), true);
+  assertEquals(err.error.hint.includes('pass network: "Rizon"'), true);
+
+  const nowhere = assertThrows(
+    () => state.resolve(undefined, "#other"),
+    BridgeFailure,
+  ) as BridgeFailure;
+  assertEquals(nowhere.error.hint.includes("not in #other on any of them"), true);
+});
+
+Deno.test("the refusal says cid when the channel's network has two connections", () => {
+  const state = new StateModel();
+  state.applyStateFrame([
+    network({ cid: 1, name: "EFnet", channels: ["#home!"] }),
+    network({ cid: 4, name: "EFNet", channels: [] }),
+  ]);
+  const err = assertThrows(
+    () => state.resolve(undefined, "#home!"),
+    BridgeFailure,
+  ) as BridgeFailure;
+  assertEquals(err.error.hint.includes("pass cid: 1"), true);
+});
+
 Deno.test("resolve reports an unknown network with the list of real ones", () => {
   const state = new StateModel();
   state.applyStateFrame([network(), network({ cid: 2, name: "net2" })]);

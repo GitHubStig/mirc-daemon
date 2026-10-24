@@ -376,6 +376,8 @@ Deno.test("xdcc_fetch goes ahead past a mere mention once the agent says it read
   const s = await stack();
   try {
     topicChannel(s, "Questions? Ask in #help.");
+    const held = await s.client.callTool({ name: "xdcc_fetch", arguments: fetchArgs });
+    assertEquals(textOf(held).startsWith("join_required:"), true);
     const body = JSON.parse(textOf(
       await s.client.callTool({
         name: "xdcc_fetch",
@@ -384,6 +386,25 @@ Deno.test("xdcc_fetch goes ahead past a mere mention once the agent says it read
     ));
     assertEquals(body.steps.includes("topic read; not joining #help"), true);
     assertEquals(s.fake.received.some((c) => c.action === "msg"), true);
+  } finally {
+    await s.stop();
+  }
+});
+
+Deno.test("xdcc_fetch ignores topicRead before it has shown the topic", async () => {
+  // Live: a small local model set topicRead: true on its first call, with no
+  // topic read, and the channel the topic required was never joined.
+  const s = await stack();
+  try {
+    topicChannel(s, "Be in #Chat-Main or be banned.");
+    const text = textOf(
+      await s.client.callTool({
+        name: "xdcc_fetch",
+        arguments: { ...fetchArgs, timeoutMs: 500, topicRead: true },
+      }),
+    );
+    assertEquals(text.startsWith("join_required:"), true);
+    assertEquals(s.fake.received.some((c) => c.action === "msg"), false);
   } finally {
     await s.stop();
   }
