@@ -125,12 +125,26 @@ What carries over is how the tools must be written, because a weak model shows e
   pending rename first, and wait a few seconds after a fresh join.
 - **A fresh session per scenario.** A small model loses the thread in a long session, and
   degenerates into repeating one line.
+- **A flag that skips a check counts only once the daemon has asked for it.** A small model fills in
+  every optional argument: ornith set `topicRead: true` on its first `xdcc_fetch` and skipped a
+  channel it was never shown. `topicRead` now counts only after a `join_required` for that channel.
+- **Say what the daemon knows.** mIRC's timestamps carry no date, and yesterday evening was reported
+  as "later today"; `irc_history` now marks where the clock goes back. A refusal for a missing
+  network says where the named channel is joined, without picking for the agent.
 
 ## Where each model stands
 
 - **Claude Haiku** (Claude Code, from an empty folder): passed 1 to 7 after three rounds, before the
   later tool changes.
-- **Gemma 4 12B, Q4, in `pi`** (`direct` mode; `codemod` never got a call through): 1 to 5 pass. On
+- **Gemma 4 12B, Q4, in `pi`** (`direct` mode; `codemod` never got a call through): 1 to 6 pass. On
   4 the search waited out the services rename, went out under the Guest nick, and the bot's answer
-  ("no results") came 4 min 44 s later, into the agent's sixth `xdcc_search_results` call. 6 and 7
-  not run yet. Its thinking sometimes collapses into one repeated line, which no tool change helps.
+  ("no results") came 4 min 44 s later, into the agent's sixth `xdcc_search_results` call. 7 is
+  untested: run in the same session as 1, it answered from what it had read there and called
+  nothing. On 3 it did not tell the user it had joined `#FILES-CHAT`. Its thinking sometimes
+  collapses into one repeated line, which no tool change helps.
+- **ornith-1.5:9b in `pi`** (2026-10-24, all seven in one session): 1 to 6 pass after one round. The
+  first run failed 3 (`topicRead: true` on the first call), went to `irc_raw` to create a channel on
+  6, and left `network` out of calls with three networks up. On 7 it paged back through
+  `irc_history`, but reported yesterday's lines as today's, which led to the new-day marker; 7 still
+  wants a fresh session. Unasked, it also refined a search with different words, said in the channel
+  under the user's nick, and did not mention the extra channel on 3.

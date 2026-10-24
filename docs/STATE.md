@@ -5,7 +5,7 @@ decision see `docs/adr/`. This file is about what is true **right now**.
 
 ## Short version
 
-_Last updated 2026-10-23. Protocol **v3**._
+_Last updated 2026-10-24. Protocol **v3**._
 
 Everything an agent needs works against a real mIRC 7.85:
 
@@ -570,10 +570,10 @@ minimised **`@bridge`** window, not the active channel. Available while debuggin
 ## Next, in order
 
 0. **Every scenario passing under a small local model in `pi`** (direct mode). A weak model shows
-   vague descriptions and unhelpful answers that Haiku gets past. Gemma passes 1 to 5. Next: run all
-   seven on ornith-1.5:9b, each in a fresh session, and 6 and 7 on Gemma. Update "Where each model
-   stands" in scenarios.md. Fix in the tool descriptions and answers, never by hinting in the
-   request.
+   vague descriptions and unhelpful answers that Haiku gets past. Gemma and ornith-1.5:9b both pass
+   1 to 6 (see "Where each model stands" in scenarios.md). Left: scenario 7 on each, alone in a
+   fresh `pi` session, which also tries `irc_history`'s new-day marker live. Fix in the tool
+   descriptions and answers, never by hinting in the request.
 1. **Close the remaining live gaps when they happen**: a bot's queue, and a real stall. Neither can
    be found on demand. When the user reports one, read the log for that window: every bot reply, DCC
    event and 15 s progress poll is in it. A stall can also be staged: the user's mIRC sends itself
