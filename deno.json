@@ -20,7 +20,7 @@
   },
   "fmt": {
     "lineWidth": 100,
-    "exclude": ["logs/", "docs/discussion/", ".commandcode/"]
+    "exclude": ["logs/", "docs/", "README.md", "AGENTS.md", "skills/", ".commandcode/"]
   },
   "compilerOptions": {
     "strict": true

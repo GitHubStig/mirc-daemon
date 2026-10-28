@@ -8,9 +8,7 @@ Each record states:
 - **Decision** — what we chose
 - **Consequences** — what it costs, and what it forecloses
 
-The early records were taken before the code was written; later ones, and amendments, came from what
-live runs showed (see `docs/findings.md`). They describe intent, so where an ADR and the code
-disagree, one of them is wrong — fix whichever it is in the same change.
+The early records were taken before the code was written; later ones, and amendments, came from what live runs showed (see `docs/findings.md`). They describe intent, so where an ADR and the code disagree, one of them is wrong — fix whichever it is in the same change.
 
 ## Index
 
