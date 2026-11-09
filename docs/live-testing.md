@@ -61,6 +61,13 @@ The daemon logs JSONL to `logs/` (timestamps in UTC): `mbp.in` and `mbp.out` for
 
 A stall can be staged the same way: the user's mIRC sends itself `/ctcp <own nick> DCC SEND …` pointing at a small local script that sends some bytes and then stops.
 
+## Stage what a network will not send
+
+Some things cannot be had on demand from a real network: a message tag, a skewed `server-time`, a wrong-key refusal, a `JOIN` with no 366 after it. For those, write a short throwaway IRC server in the same Deno script that drives the daemon, and connect with `irc_connect {network: "Stage", server: "127.0.0.1", port: 16667}`. It needs little: answer `CAP LS`, `CAP REQ` and `CAP END`, send 001 to 005 and 422, and answer `JOIN` and `PING`. Nobody else is on it, so there is no ban risk.
+
+- **mIRC logs it like any other network.** If logging is on, each window becomes a `*.Stage.log` file in mIRC's `logs` folder, and reconnecting reloads those lines into the window. Delete them afterwards. Those files are also how to read the status window, which `irc_history` cannot.
+- **Close it with `irc_disconnect {network: "Stage"}`** if a transfer is running elsewhere: `irc_cleanup` closes everything the agent opened, the transfer's connection included.
+
 ## Shell gotcha (Windows)
 
 Bash heredocs and `deno eval` strings mangle backslashes: `\\n` becomes `\n`, and Windows paths break. Write test or patch code to a file, or use `String.raw`, and use forward-slash paths in Deno strings.

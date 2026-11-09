@@ -2,9 +2,9 @@
 
 Handover notes: what is still to do, and how the user's mIRC is set up for testing. For how to work on the repo see [AGENTS.md](../AGENTS.md); for what has been proven live, and the traps found on the way, see [findings.md](findings.md); for the _why_ behind each decision, [adr/](adr/README.md).
 
-_Last updated 2026-10-24. Protocol **v1**._
+_Last updated 2026-11-09. Protocol **v1**._
 
-Everything an agent needs works against a real mIRC 7.85: driving it over MCP, several networks at once without touching the user's connections, TLS, the whole DCC path, and XDCC from a real bot through to completion, with search, resume and cancel. Claude Haiku passes all seven agent scenarios and two small local models pass 1 to 6 (see [scenarios.md](scenarios.md)).
+Everything an agent needs works against a real mIRC 7.86: driving it over MCP, several networks at once without touching the user's connections, TLS, the whole DCC path, and XDCC from a real bot through to completion, with search, resume and cancel. Claude Haiku passes all seven agent scenarios and two small local models pass 1 to 6 (see [scenarios.md](scenarios.md)).
 
 ## Live gaps, to close when they happen
 
@@ -13,7 +13,8 @@ None of these can be produced on demand. When the user reports one, read the dae
 - **A bot's queue**: `queued` with a position. The bots tested so far always sent at once.
 - **A real stall**: a transfer is called _stalled_ after 60 s without new bytes. Unit-tested only; it can also be staged (see live-testing.md).
 - **A slow search bot's late answer landing during the next search**: set aside as `fromAnotherSearch`. Unit-tested on the order of lines seen live.
-- **A wrong-key refusal (475)**: cannot be staged inside one mIRC, which supplies the key it has just seen. The 477 hint (registered nick, services rename) is also unseen live.
+- **The 477 hint** (registered nick, services rename) is unseen live.
+- **`echo-message` turned on**: mIRC 7.86 does not request it by default, so whether an echoed line reaches `on TEXT` is untested. Try it if anyone enables it on a server the agent uses.
 - **Reconnecting a user's quit window** rejoins the channels still open in it, if mIRC's rejoin option is on. Expected, not yet seen.
 - **The heartbeat's "silent" path**: no real hang of mIRC has been seen.
 
@@ -25,6 +26,11 @@ Seen once in the 2026-10-24 agent runs, and judged not worth a change yet:
 - A small model refined a search with different words, unasked, which is said in the channel under the user's nick. If it recurs, say in `xdcc_search` to ask the user before searching again.
 - `irc_history`'s new-day marker works within one reply, not across the boundary between pages.
 - Scenario 7 on the small models, alone in a fresh session, was judged not worth a separate run. Rerun the scenarios after any change to tool descriptions or answers.
+
+Seen in the 2026-11-09 run on mIRC 7.86, and not changed yet:
+
+- A join sent right after registering took 5.9 s on Libera, against the bridge's 8 s timer. A slower one would report `join_timeout` for a join that then succeeds. One sample; raise the timer if it recurs.
+- The log's redactor treats any `oper` as a credential, including inside the capability `solanum.chat/oper`. It swallows the next token and the frame's closing characters, so that `mbp.in` line's inner JSON no longer parses. The daemon itself read the frame correctly: only the log is affected. `IRC_CREDENTIAL_RE` in `src/core/log.ts` should not match inside a longer token.
 
 ## The user's mIRC right now
 

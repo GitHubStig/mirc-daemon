@@ -1,6 +1,6 @@
 # Findings
 
-What running the daemon against a real mIRC 7.85 and real IRC networks proved, what is still assumed, and the traps that failed silently on the way. Dated entries are history: the code has moved on, and each fix's details are in the commit that made it. For what is left to do, see [STATE.md](STATE.md).
+What running the daemon against a real mIRC (7.85, then 7.86) and real IRC networks proved, what is still assumed, and the traps that failed silently on the way. Dated entries are history: the code has moved on, and each fix's details are in the commit that made it. For what is left to do, see [STATE.md](STATE.md).
 
 Protocol versions below (v1, v2, v3) are the development versions; the first release renumbered the protocol v1 (see ADR-0002). Names of people, the user's nick and channel, and test channels and bots are placeholders.
 
@@ -128,13 +128,28 @@ Reads and progress polls are not logged. The notes are best effort: never awaite
 
 - **A real agent driving it** (2026-10-23, done 2026-10-24). Plain requests from [docs/scenarios.md](scenarios.md) were given to an agent that had only the MCP tools, with no hints, and graded from `deno task report` (`scripts/session_report.ts`: every tool call, the `@bridge` lines, what was said under the user's nick, and guard refusals, for a time window). Claude Haiku passes all seven; two small local models in `pi` (Gemma 4 12B and ornith-1.5:9b) pass 1 to 6, and 7 on them was judged not worth a separate run. Where each model stands, and the rules the runs taught about writing tools, are at the end of scenarios.md; each round's details are in the commit that fixed it. Rerun the scenarios after any change to tool descriptions or answers.
 
+- **mIRC 7.86** (2026-11-09). The script needed no change.
+  - **Real networks.** `hello` reports `7.86`. On Libera over TLS: connected in 8.7 s, `irc_join` answered on `raw 366` with 1,596 members, and `irc_ison` reported present and absent nicks correctly. `/bridge.diag` printed `b64-test ok`.
+  - **XDCC on `irc.williamgattone.it`.** The 1.6 GB test file was cut by 100 MB. `xdcc_fetch` resumed it, `xdcc_cancel` stopped it mid-transfer (mIRC reported `GETFAIL`), and a second `xdcc_fetch` resumed from where the cancel stopped and ran to `complete`. The SHA-256 afterwards matched the hash taken before the cut.
+  - **Capabilities.** Libera offered `echo-message`, `no-implicit-names` and `server-time`. mIRC requested `server-time` and neither of the others, and the staged server below saw the same choice. `server-time` is not new: a server acknowledged it in the 7.85 logs too. 7.86 only adds a way to turn it off.
+  - **A local staged IRC server** (see [live-testing.md](live-testing.md)) supplied what networks will not send on demand:
+    - **`server-time` stamps a window line with the server's clock**, and other lines keep the local one. A line tagged two minutes back read `[11:43]` between two `[11:45]` lines, and `irc_history` called that a new day. `markDays` now ignores steps back of 5 minutes or less. A tagged line older than that, such as a bouncer's playback, can still produce a false marker.
+    - **`no-implicit-names` would break joins**: with no 366 after `JOIN`, `irc_join` returned `join_timeout` at 8 s while mIRC had joined. It is off by default. Leave it off on servers the agent uses.
+    - **`context-chan` left `buf` as the sender**, for a private message or a notice, with all four tag spellings tried (`+draft/channel-context`, `+draft/context-chan`, `+context-chan`, `context-chan`). So a bot's reply would not be filed under a channel and missed. Private messages opened query windows. One notice from a channel member showed in the channel window; with no untagged notice to compare it with, that may be mIRC's usual routing, and it does not change the event.
+    - **The refusals 473 and 475** gave `join_failed`, "invite-only" and "requires a key".
+    - **Sending and CTCP:** `irc_send` delivered a quote pair, a backslash and `ü` intact. A CTCP reached the daemon as an event, and 7.86 now gives its line a timestamp in mIRC's log.
+
 ## Not verified
 
 Assumed or untested. Treat these as the actual risk surface.
 
 - **Reconnecting a user's quit window** rejoins whatever channels were still open in it, if mIRC's rejoin option is on. That is expected, but not yet seen live.
 
-- **A wrong-key refusal (475)** cannot be staged inside one mIRC. When an agent connection set `+k` on a test channel, the user's connection, in the same mIRC, then joined with no key given and got in. mIRC evidently supplied the key it had just seen. The mapping (475 → `join_failed`, "the channel requires a key") is unit-tested only. The 477 hint (registered nick, services rename) is also unseen live.
+- **A wrong-key refusal (475)** cannot be staged inside one mIRC on a real network. When an agent connection set `+k` on a test channel, the user's connection, in the same mIRC, then joined with no key given and got in. mIRC evidently supplied the key it had just seen. A local staged server does produce it (see the 7.86 entry above). The 477 hint (registered nick, services rename) is unseen live.
+
+- **`echo-message` turned on.** mIRC does not request it by default on 7.86, so this has not been seen. `on TEXT` and `on NOTICE` do not skip our own nick, so an echoed line reaching them would look incoming. The changelog says mIRC has filtered echoes since 7.69, which suggests it never gets that far.
+
+- **`context-chan` on a real network.** Only the staged server has sent it, and the changelog does not give the tag's spelling, so it is possible none of the four tried is the one mIRC acts on. What is unproven is the routing; nothing seen so far changes `buf`.
 
 **XDCC, still unseen live:** a bot's queue (`queued` with a position); this bot always sent at once. And a real stall: the daemon now calls a transfer _stalled_ after 60 s without new bytes, whatever mIRC does or does not report, but that is unit-tested only.
 

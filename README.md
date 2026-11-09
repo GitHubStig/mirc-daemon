@@ -22,7 +22,7 @@ Everything it does that you would see, or that others see from you, is noted in 
 ## Requirements
 
 - [Deno](https://deno.com) 2.
-- mIRC 7 (developed against 7.85), on Windows.
+- mIRC 7 (developed against 7.85, tested on 7.86), on Windows.
 
 ## Install
 
