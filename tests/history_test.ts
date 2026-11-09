@@ -26,6 +26,19 @@ Deno.test("a marker goes where the clock goes back, past lines with no time", ()
   assertEquals(lines[4], "[11:26] * Friend has joined #home!");
 });
 
+Deno.test("a small step back is clock skew, not a new day", () => {
+  // A server-time line stamped by the server's clock, between two stamped locally.
+  const { lines, days } = markDays(["[11:45] a", "[11:43] b", "[11:45] c"]);
+  assertEquals(days, 0);
+  assertEquals(lines, ["[11:45] a", "[11:43] b", "[11:45] c"]);
+});
+
+Deno.test("skew is judged at its limit, and midnight is still a new day", () => {
+  assertEquals(markDays(["[11:45] a", "[11:40] b"]).days, 0);
+  assertEquals(markDays(["[11:45] a", "[11:39] b"]).days, 1);
+  assertEquals(markDays(["[23:59] a", "[00:00] b"]).days, 1);
+});
+
 Deno.test("no marker while the clock only moves forward, or with no timestamps", () => {
   assertEquals(markDays(["[10:00] a", "[10:00] b", "[11:30] c"]).days, 0);
   assertEquals(markDays(["<a> hi", "<b> hello"]).days, 0);

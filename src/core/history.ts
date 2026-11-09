@@ -20,6 +20,14 @@ export function timeOfDay(line: string): number | undefined {
   return hours * 60 + minutes;
 }
 
+/**
+ * A smaller step back than this is two clocks disagreeing, not a new day. mIRC
+ * stamps a line carrying server-time with the server's clock and everything else
+ * with the local one, so a line can read a minute behind the one above it. Staged
+ * on 7.86 (2026-11-09): that alone produced a false "new day" marker.
+ */
+const CLOCK_SKEW_MINUTES = 5;
+
 /** The marker put between two days, saying why it is there. */
 function marker(before: string, after: string): string {
   return `--- new day: the clock goes back from ${before} to ${after}, so the lines below are ` +
@@ -27,10 +35,11 @@ function marker(before: string, after: string): string {
 }
 
 /**
- * The lines with a marker wherever the clock goes back, which only a new day
- * explains. Lines with no timestamp (blank lines, separators) are skipped over.
- * A day boundary where the clock still moves forward (10:00, then 11:00 the
- * next day) cannot be seen, so the markers are a lower bound.
+ * The lines with a marker wherever the clock goes back further than clock skew
+ * explains, which leaves a new day. Lines with no timestamp (blank lines,
+ * separators) are skipped over. A day boundary where the clock still moves
+ * forward (10:00, then 11:00 the next day), or back by less than the skew, cannot
+ * be seen, so the markers are a lower bound.
  */
 export function markDays(lines: readonly string[]): { lines: string[]; days: number } {
   const out: string[] = [];
@@ -39,7 +48,7 @@ export function markDays(lines: readonly string[]): { lines: string[]; days: num
   for (const line of lines) {
     const minutes = timeOfDay(line);
     if (minutes !== undefined) {
-      if (last !== undefined && minutes < last.minutes) {
+      if (last !== undefined && last.minutes - minutes > CLOCK_SKEW_MINUTES) {
         out.push(marker(stamp(last.text), stamp(line)));
         days += 1;
       }
